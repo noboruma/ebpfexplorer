@@ -1,0 +1,43 @@
+# Builds ebpfexplorer for Linux amd64/arm64 and attaches the binaries (and
+# their SHA-256 checksums) to a GitHub release when it is published.
+name: release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write # upload release assets
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Test
+        if: matrix.goarch == 'amd64' # tests are architecture independent; run them once
+        run: go test ./...
+
+      - name: Build
+        env:
+          CGO_ENABLED: "0" # static binary, runs on any Linux distribution
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          name="ebpfexplorer-linux-${GOARCH}"
+          mkdir -p dist
+          go build -trimpath -ldflags "-s -w" -o "dist/${name}" .
+          (cd dist && sha256sum "${name}" > "${name}.sha256")
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" dist/* --repo "${{ github.repository }}" --clobber
