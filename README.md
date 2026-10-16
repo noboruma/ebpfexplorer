@@ -179,41 +179,21 @@ Both files have the same layout, keyed by map name:
 
 A formats file can also be appended to the binary, so a single file carries them. Bundled formats are
 read-only defaults: a format saved with `[e]` takes precedence (and is saved to the file above, never to
-the binary), and clearing it falls back to the bundled one.
-
-With the Makefile:
-
-```sh
-make bundle                  # build ./ebpfexplorer if missing, bundle formats.json (replaces any bundled formats)
-make bundle BIN=dist/ebpfexplorer-linux-arm64 CFG=team.json
-make show                    # print the bundled formats
-make unbundle                # remove them
-```
-
-or by hand:
+the binary), and clearing it falls back to the bundled one. Run the following to bundle `formats.json` into
+`ebpfexplorer`, replacing any formats already bundled:
 
 ```sh
-# bundle formats.json into ebpfexplorer, replacing any formats already bundled
 # layout: <binary><formats JSON><JSON length, 16 digits>EBPFXCFG
-bin=ebpfexplorer cfg=formats.json
-rm -f "$bin.tmp"
-if [ "$(tail -c 8 "$bin" | tr -d '\0')" = EBPFXCFG ]; then
-  n=$(tail -c 24 "$bin" | head -c 16); head -c -$((10#$n + 24)) "$bin" > "$bin.tmp"
-else
-  cp "$bin" "$bin.tmp"
+if [ "$(tail -c 8 ebpfexplorer | tr -d '\0')" = EBPFXCFG ]; then
+  head -c -$(expr $(tail -c 24 ebpfexplorer | head -c 16) + 24) ebpfexplorer > ebpfexplorer.tmp && mv ebpfexplorer.tmp ebpfexplorer
 fi
-{ cat "$cfg"; printf '%016d%s' "$(stat -c %s "$cfg")" EBPFXCFG; } >> "$bin.tmp"
-chmod +x "$bin.tmp" && mv "$bin.tmp" "$bin"
-
-# inspect what is bundled
-n=$(tail -c 24 ebpfexplorer-bundled | head -c 16); tail -c $((10#$n + 24)) ebpfexplorer-bundled | head -c $((10#$n))
-
-# remove the bundled formats
-n=$(tail -c 24 ebpfexplorer-bundled | head -c 16); head -c -$((10#$n + 24)) ebpfexplorer-bundled > ebpfexplorer
+cat formats.json >> ebpfexplorer
+printf '%016d%s' $(stat -c %s formats.json) EBPFXCFG >> ebpfexplorer
+chmod +x ebpfexplorer
 ```
 
-Tools that rewrite
-the ELF, such as `strip` or `upx`, drop the bundled formats.
+In a Makefile recipe, write each `$` as `$$`. Tools that rewrite the ELF, such as `strip` or `upx`, drop the
+bundled formats.
 
 ## Keybind: Refresh
 
