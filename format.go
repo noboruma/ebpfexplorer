@@ -658,6 +658,9 @@ type formatDef struct {
 type formatStore struct {
 	path string
 	defs map[string]formatDef
+	// embedded holds read-only defaults appended to the executable (see
+	// readEmbeddedFormats); defs take precedence and are all that is saved.
+	embedded map[string]formatDef
 	// compiled caches parsed definitions; nil entries mean "not defined".
 	compiled map[string]compiledFormat
 }
@@ -733,22 +736,95 @@ func loadFormats(path string) (*formatStore, error) {
 	if err != nil {
 		return s, err
 	}
+	maps, err := parseFormatsJSON(data)
+	if err != nil {
+		return s, fmt.Errorf("%s: %w", s.path, err)
+	}
+	for name, d := range maps {
+		s.defs[name] = d
+		s.compiled[name] = compileDef(d)
+	}
+	return s, nil
+}
+
+func parseFormatsJSON(data []byte) (map[string]formatDef, error) {
 	var file struct {
 		Maps map[string]formatDef `json:"maps"`
 	}
 	if err := json.Unmarshal(data, &file); err != nil {
-		return s, fmt.Errorf("%s: %w", s.path, err)
+		return nil, err
 	}
-	for name, d := range file.Maps {
-		s.defs[name] = d
-		// Definitions were validated when saved; a hand-edited broken one
-		// simply shows as hex.
-		var c compiledFormat
-		c.key, _ = parseOptional(d.Key)
-		c.value, _ = parseOptional(d.Value)
-		s.compiled[name] = c
+	return file.Maps, nil
+}
+
+// compileDef parses a stored definition. Definitions were validated when
+// saved; a hand-edited broken one simply shows as hex.
+func compileDef(d formatDef) compiledFormat {
+	var c compiledFormat
+	c.key, _ = parseOptional(d.Key)
+	c.value, _ = parseOptional(d.Value)
+	return c
+}
+
+// setEmbedded installs read-only default formats; maps that already have a
+// user definition keep it.
+func (s *formatStore) setEmbedded(defs map[string]formatDef) {
+	s.embedded = defs
+	for name, d := range defs {
+		if _, ok := s.defs[name]; !ok {
+			s.compiled[name] = compileDef(d)
+		}
 	}
-	return s, nil
+}
+
+// Formats can be appended to the executable so a single file carries them:
+//
+//	<binary><formats JSON><JSON length, 16 decimal digits>EBPFXCFG
+//
+// The kernel ignores bytes past the ELF segments, so the binary still runs.
+const (
+	embeddedMagic      = "EBPFXCFG"
+	embeddedTrailerLen = 16 + len(embeddedMagic)
+)
+
+// readEmbeddedFormats returns the formats appended to the executable at
+// path, or nil if there are none.
+func readEmbeddedFormats(path string) (map[string]formatDef, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if st.Size() < int64(embeddedTrailerLen) {
+		return nil, nil
+	}
+	trailer := make([]byte, embeddedTrailerLen)
+	if _, err := f.ReadAt(trailer, st.Size()-int64(embeddedTrailerLen)); err != nil {
+		return nil, err
+	}
+	if string(trailer[16:]) != embeddedMagic {
+		return nil, nil
+	}
+	n, err := strconv.ParseInt(string(trailer[:16]), 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("embedded formats: bad length %q", trailer[:16])
+	}
+	if n < 0 || n > st.Size()-int64(embeddedTrailerLen) {
+		return nil, fmt.Errorf("embedded formats: length %d out of range", n)
+	}
+	data := make([]byte, n)
+	if _, err := f.ReadAt(data, st.Size()-int64(embeddedTrailerLen)-n); err != nil {
+		return nil, err
+	}
+	maps, err := parseFormatsJSON(data)
+	if err != nil {
+		return nil, fmt.Errorf("embedded formats: %w", err)
+	}
+	return maps, nil
 }
 
 func parseOptional(src string) (*ctype, error) {
@@ -762,11 +838,24 @@ func (s *formatStore) get(mp mapRow) compiledFormat {
 	return s.compiled[formatKey(mp)]
 }
 
+// def is the definition in effect for mp: the user's, else the embedded one.
+func (s *formatStore) def(mp mapRow) formatDef {
+	name := formatKey(mp)
+	if d, ok := s.defs[name]; ok {
+		return d
+	}
+	return s.embedded[name]
+}
+
 func (s *formatStore) set(mp mapRow, d formatDef, c compiledFormat) error {
 	name := formatKey(mp)
 	if d.Key == "" && d.Value == "" {
 		delete(s.defs, name)
-		delete(s.compiled, name)
+		if e, ok := s.embedded[name]; ok {
+			s.compiled[name] = compileDef(e)
+		} else {
+			delete(s.compiled, name)
+		}
 	} else {
 		s.defs[name] = d
 		s.compiled[name] = c

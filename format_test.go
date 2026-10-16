@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/binary"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -156,5 +157,54 @@ func TestFormatsPath(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", "/xdg")
 	if got, err := formatsPath(); err != nil || got != "/xdg/ebpfexplorer/formats.json" {
 		t.Fatalf("global path = %q, %v", got, err)
+	}
+}
+
+func TestEmbeddedFormats(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "ebpfexplorer")
+
+	// No trailer: nothing embedded.
+	if err := os.WriteFile(exe, []byte("\x7fELF...binary..."), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := readEmbeddedFormats(exe); err != nil || got != nil {
+		t.Fatalf("plain binary: %v, %v", got, err)
+	}
+
+	// Same layout the README's shell commands produce.
+	js := `{"maps": {"conntrack": {"key": "__u32"}, "flows": {"value": "__u64"}}}` + "\n"
+	f, _ := os.OpenFile(exe, os.O_APPEND|os.O_WRONLY, 0)
+	fmt.Fprintf(f, "%s%016d%s", js, len(js), embeddedMagic)
+	f.Close()
+	got, err := readEmbeddedFormats(exe)
+	if err != nil || got["conntrack"].Key != "__u32" || got["flows"].Value != "__u64" {
+		t.Fatalf("embedded: %v, %v", got, err)
+	}
+
+	// User definitions win; clearing one falls back to the embedded default,
+	// and embedded defaults are never written to the user's file.
+	path := filepath.Join(dir, localFormatsFile)
+	s, _ := loadFormats(path)
+	s.setEmbedded(got)
+	mp := mapRow{Name: "conntrack"}
+	if c := s.get(mp); c.key == nil || c.key.size != 4 {
+		t.Fatalf("embedded format not applied: %+v", c)
+	}
+	k, _ := parseCType("__u64")
+	if err := s.set(mp, formatDef{Key: "__u64"}, compiledFormat{key: k}); err != nil {
+		t.Fatal(err)
+	}
+	if c := s.get(mp); c.key.size != 8 || s.def(mp).Key != "__u64" {
+		t.Fatalf("user format not preferred: %+v", c)
+	}
+	if err := s.set(mp, formatDef{}, compiledFormat{}); err != nil {
+		t.Fatal(err)
+	}
+	if c := s.get(mp); c.key == nil || c.key.size != 4 {
+		t.Fatalf("embedded format not restored: %+v", c)
+	}
+	if data, _ := os.ReadFile(path); strings.Contains(string(data), "flows") {
+		t.Fatalf("embedded formats saved to user file: %s", data)
 	}
 }

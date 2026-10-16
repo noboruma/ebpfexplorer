@@ -135,6 +135,11 @@ func initialModel(xdpOnly bool) model {
 	if err != nil {
 		m.err = fmt.Errorf("loading formats: %w", err)
 	}
+	if defs, err := readEmbeddedFormats("/proc/self/exe"); err != nil {
+		m.err = errors.Join(m.err, err)
+	} else {
+		m.formats.setEmbedded(defs)
+	}
 	// Data can load before the first WindowSizeMsg: lay out for a default
 	// size up front.
 	m.width, m.height = 80, 24
@@ -359,7 +364,7 @@ func (m model) handleKey(key string) (tea.Model, tea.Cmd) {
 		return m.refresh()
 	case "e":
 		if mp, ok := m.formatTarget(); ok {
-			d := m.formats.defs[formatKey(mp)]
+			d := m.formats.def(mp)
 			m.fmtEdit = newFmtEditor(mp, d)
 			m.fmtEdit.path = m.formats.path
 			return m, textinput.Blink
