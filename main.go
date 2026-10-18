@@ -104,6 +104,11 @@ type model struct {
 	formats *formatStore
 	fmtEdit *fmtEditor
 
+	// Links of curMap (see links.go); linkGen invalidates in-flight
+	// resolutions.
+	links   []*mapLink
+	linkGen int
+
 	// Processes holding the current program (maps view) or map (entries
 	// view) open; nil while the /proc scan is running.
 	holders     []string
@@ -319,6 +324,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case linksResolved:
+		return m.onLinksResolved(msg)
+
+	case mapsListed:
+		if m.fmtEdit != nil {
+			m.fmtEdit.setMaps(msg.rows, msg.err)
+		}
+		return m, nil
+
 	case searchDone:
 		if msg.gen != m.searchGen.Load() {
 			return m, nil
@@ -364,10 +378,11 @@ func (m model) handleKey(key string) (tea.Model, tea.Cmd) {
 		return m.refresh()
 	case "e":
 		if mp, ok := m.formatTarget(); ok {
-			d := m.formats.def(mp)
-			m.fmtEdit = newFmtEditor(mp, d)
+			m.fmtEdit = newFmtEditor(mp, m.formats.def(mp))
 			m.fmtEdit.path = m.formats.path
-			return m, textinput.Blink
+			m.fmtEdit.prog = m.curProg.MapIDs
+			// Every loaded map, to check and pick link targets.
+			return m, tea.Batch(textinput.Blink, listMapsCmd)
 		}
 	case "x":
 		if m.view == viewProgs {
@@ -478,6 +493,7 @@ func (m model) refresh() (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmd, m.loadHolders())
 	case viewDetail:
 		m.entryReload = true
+		m.clearLinkCaches()
 		key := slices.Clone(m.store.key(m.detailIdx))
 		return m, refreshEntryCmd(m.curMap.ID, key, m.detailIdx, m.loadGen)
 	}
@@ -552,6 +568,7 @@ func (m *model) applyProgFilter() {
 func (m *model) applyKeyFilter() tea.Cmd {
 	m.query = newKeyQuery(m.keyFilter.Value())
 	m.query.format, _ = m.activeFormats() // also match the formatted key
+	m.query.links = m.links               // and what its linked fields translate to
 	gen := m.searchGen.Add(1)             // also cancels any running scan
 	m.entryPane.cur, m.entryPane.off = 0, 0
 	if m.query.empty() {
@@ -578,7 +595,7 @@ func (m *model) startEntries() tea.Cmd {
 	m.loading, m.loadErr = true, nil
 	m.entryPane, m.pendingCur = pane{}, -1
 	m.visible, m.filteredUpTo = nil, 0
-	return tea.Batch(readChunkCmd(m.curMap.ID, nil, m.loadGen), m.applyKeyFilter())
+	return tea.Batch(readChunkCmd(m.curMap.ID, nil, m.loadGen), m.applyKeyFilter(), m.resolveLinks())
 }
 
 // stopEntries makes in-flight chunk reads close their loader on arrival and
@@ -589,6 +606,7 @@ func (m *model) stopEntries() {
 	m.loading, m.searching = false, false
 	m.store = entryStore{}
 	m.visible = nil
+	m.dropLinks()
 }
 
 func (m *model) visCount() int {
@@ -693,7 +711,7 @@ func (m model) headerLines() []string {
 		kf, _ := m.activeFormats()
 		lines := []string{
 			crumbStyle.Render(fmt.Sprintf("map %d %q (%s)  entry #%d", m.curMap.ID, m.curMap.Name, m.curMap.Type, m.detailIdx)),
-			labelStyle.Render("key: ") + formatOrHex(kf, m.store.key(m.detailIdx)),
+			labelStyle.Render("key: ") + formatOrHexNoted(kf, m.store.key(m.detailIdx), m.linkNote(0, m.detailIdx)),
 		}
 		if m.detailGone {
 			lines = append(lines, errStyle.Render("this key no longer exists in the map; showing the last value read"))
@@ -894,19 +912,33 @@ func countCell(mp mapRow) string {
 }
 
 func (m model) entryColumns() []column {
+	cols := m.entryCol
 	if kf, vf := m.activeFormats(); kf != nil || vf != nil {
-		return m.entryColFmt
+		cols = m.entryColFmt
 	}
-	return m.entryCol
+	// Linked fields show their translation in place: say so in the title.
+	keyLinked, valueLinked := linkedSide(m.links, 0), linkedSide(m.links, 1)
+	if !keyLinked && !valueLinked {
+		return cols
+	}
+	cols = slices.Clone(cols)
+	for i, c := range cols {
+		if c.title == "Key" && keyLinked || c.title == "Value" && valueLinked {
+			cols[i].title += " (linked)"
+		}
+	}
+	return cols
 }
 
 // entryFields returns the full, untruncated text of each column for entry i;
 // cell() cuts it to the column width and ←/→ scroll through the rest.
+// Linked fields are followed by their translation ("backend_id=3→{…}").
 func (m model) entryFields(i int) []string {
 	key, vals := m.store.key(i), m.store.values(i)
+	kn, vn := m.linkNote(0, i), m.linkNote(1, i)
 	perCPU := isPerCPU(m.curMap.Type)
 	if kf, vf := m.activeFormats(); kf != nil || vf != nil {
-		return []string{fmt.Sprint(i), formatOrHex(kf, key), formatValues(vf, vals, perCPU)}
+		return []string{fmt.Sprint(i), formatOrHexNoted(kf, key, kn), formatValues(vf, vals, perCPU, vn)}
 	}
 	var val, dec string
 	if perCPU {
@@ -918,7 +950,7 @@ func (m model) entryFields(i int) []string {
 		val = hexBytes(vals[0], 0)
 		dec = shortDecode(vals[0])
 	}
-	return []string{fmt.Sprint(i), hexBytes(key, 0), shortDecode(key), val, dec}
+	return []string{fmt.Sprint(i), hexBytes(key, 0), shortDecode(key) + kn.of(""), val, dec + vn.of("")}
 }
 
 func (m model) renderEntry(i int) string {
@@ -929,34 +961,55 @@ func (m model) renderEntry(i int) string {
 	if m.detailGone {
 		b.WriteString(errStyle.Render("this key no longer exists in the map; showing the last value read") + "\n\n")
 	}
-	b.WriteString(renderBytes(fmt.Sprintf("KEY (%d bytes)", len(key)), kf, key) + "\n")
+	kn, vn := m.linkNote(0, i), m.linkNote(1, i)
+	b.WriteString(renderBytes(fmt.Sprintf("KEY (%d bytes)", len(key)), kf, key, kn) + "\n")
 
 	if isPerCPU(m.curMap.Type) {
 		if vf != nil {
-			b.WriteString(renderBytes(fmt.Sprintf("VALUE Σ over %d CPUs", len(vals)), vf, vf.sumPerCPU(vals)) + "\n")
+			b.WriteString(renderBytes(fmt.Sprintf("VALUE Σ over %d CPUs", len(vals)), vf, vf.sumPerCPU(vals), vn) + "\n")
 		} else if sum, ok := sumPerCPU(vals); ok {
 			fmt.Fprintf(&b, "VALUE sum over %d CPUs = %d\n\n", len(vals), sum)
 		}
 		for cpu, v := range vals {
-			b.WriteString(renderBytes(fmt.Sprintf("VALUE cpu%d (%d bytes)", cpu, len(v)), vf, v) + "\n")
+			b.WriteString(renderBytes(fmt.Sprintf("VALUE cpu%d (%d bytes)", cpu, len(v)), vf, v, nil) + "\n")
 		}
 	} else {
 		v := vals[0]
-		b.WriteString(renderBytes(fmt.Sprintf("VALUE (%d bytes)", len(v)), vf, v))
+		b.WriteString(renderBytes(fmt.Sprintf("VALUE (%d bytes)", len(v)), vf, v, vn))
 	}
 	return b.String()
 }
 
 // renderBytes renders a key or value for the detail view: one line per
 // field with a format, a hex dump otherwise.
-func renderBytes(title string, t *ctype, data []byte) string {
+func renderBytes(title string, t *ctype, data []byte, n note) string {
 	if t != nil {
-		return title + "\n  " + strings.Join(t.lines("", data), "\n  ") + "\n"
+		return wholeNote(t, title, n) + "\n  " + strings.Join(t.linesNoted("", data, n), "\n  ") + "\n"
 	}
 	if d := decode(data); d != "" {
 		title += "  = " + d
 	}
-	return title + "\n" + hexDump(data)
+	return title + n.of("") + "\n" + hexDump(data)
+}
+
+// formatOrHexNoted is formatOrHex with notes: after each field of a format,
+// and after the whole text for the key or value itself (path "").
+func formatOrHexNoted(t *ctype, b []byte, n note) string {
+	if t == nil {
+		return formatOrHex(nil, b) + n.of("")
+	}
+	return wholeNote(t, t.formatNoted(b, n), n)
+}
+
+// wholeNote appends the note of a whole struct; the note of a whole scalar
+// is already after its value.
+func wholeNote(t *ctype, s string, n note) string {
+	if t != nil && (t.kind == kStruct || t.kind == kUnion) {
+		if w := n.of(""); w != "" {
+			return s + " " + w
+		}
+	}
+	return s
 }
 
 func formatOrHex(t *ctype, b []byte) string {
@@ -969,35 +1022,38 @@ func formatOrHex(t *ctype, b []byte) string {
 	return hexBytes(b, 0)
 }
 
-func formatValues(t *ctype, vals [][]byte, perCPU bool) string {
+func formatValues(t *ctype, vals [][]byte, perCPU bool, n note) string {
 	switch {
 	case !perCPU:
-		return formatOrHex(t, vals[0])
+		return formatOrHexNoted(t, vals[0], n)
 	case t != nil && (t.kind == kStruct || t.kind == kUnion):
 		// Fields are summed per field; braces read better than Σ in front
 		// of a list of fields.
-		return "{" + t.format(t.sumPerCPU(vals)) + "}"
+		return wholeNote(t, "{"+t.formatNoted(t.sumPerCPU(vals), n)+"}", n)
 	case t != nil:
-		return "Σ " + t.format(t.sumPerCPU(vals))
+		return "Σ " + t.formatNoted(t.sumPerCPU(vals), n)
 	}
 	if sum, ok := sumPerCPU(vals); ok {
-		return fmt.Sprintf("Σ %d [%d CPUs]", sum, len(vals))
+		return fmt.Sprintf("Σ %d [%d CPUs]", sum, len(vals)) + n.of("")
 	}
-	return fmt.Sprintf("[%d CPUs] %s", len(vals), hexBytes(vals[0], 0))
+	return fmt.Sprintf("[%d CPUs] %s", len(vals), hexBytes(vals[0], 0)) + n.of("")
 }
 
 // activeFormats returns the formats to apply to curMap's keys and values:
 // nil (shown as hex) when undefined or not matching the map's sizes (a
 // hand-edited formats.json, or a map that changed layout).
-func (m model) activeFormats() (key, value *ctype) {
+func (m model) activeFormats() (key, value *ctype) { return m.formatsFor(m.curMap) }
+
+// formatsFor is activeFormats for any map (e.g. a link target).
+func (m model) formatsFor(mp mapRow) (key, value *ctype) {
 	if m.formats == nil {
 		return nil, nil
 	}
-	c := m.formats.get(m.curMap)
-	if c.key != nil && c.key.size == int(m.curMap.KeySize) {
+	c := m.formats.get(mp)
+	if c.key != nil && c.key.size == int(mp.KeySize) {
 		key = c.key
 	}
-	if c.value != nil && c.value.size == int(m.curMap.ValueSize) {
+	if c.value != nil && c.value.size == int(mp.ValueSize) {
 		value = c.value
 	}
 	return key, value
@@ -1038,13 +1094,17 @@ func (m *model) formatsChanged() tea.Cmd {
 	if m.view == viewDetail {
 		m.setDetail(m.renderEntry(m.detailIdx))
 	}
+	var cmds []tea.Cmd
+	if m.view >= viewEntries {
+		// Linked fields are found through the format.
+		cmds = append(cmds, m.resolveLinks())
+	}
 	if !m.query.empty() {
 		cur := m.entryPane.cur
-		cmd := m.applyKeyFilter()
+		cmds = append(cmds, m.applyKeyFilter())
 		m.pendingCur = cur
-		return cmd
 	}
-	return nil
+	return tea.Batch(cmds...)
 }
 
 func (m *model) resize() {
@@ -1114,7 +1174,7 @@ func (m model) View() string {
 	}
 	content := strings.Join(body, "\n")
 	if m.fmtEdit != nil {
-		content = m.fmtEdit.view(m.width - 2)
+		content = m.fmtEdit.view(m.width-2, m.height-3)
 	}
 	// Fixed-height body so the footer doesn't jump while data streams in.
 	b.WriteString(lipgloss.NewStyle().Height(m.height - 3).MaxHeight(m.height - 3).Render(content))
@@ -1200,7 +1260,7 @@ func (m model) help() string {
 	var keys [][2]string
 	switch {
 	case m.fmtEdit != nil:
-		keys = [][2]string{{"tab", "switch key/value"}, {"enter", "save"}, {"esc", "cancel"}}
+		keys = m.fmtEdit.help()
 	case m.editing:
 		keys = [][2]string{{"enter", "apply"}, {"esc", "clear"}}
 	case m.view == viewProgs:

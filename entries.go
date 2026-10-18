@@ -200,7 +200,8 @@ func byteArraySlice(size, n int) (reflect.Value, []byte) {
 
 type keyQuery struct {
 	raw, hex string
-	format   *ctype // when set, the formatted key is searched too
+	format   *ctype     // when set, the formatted key is searched too
+	links    []*mapLink // with the translations of its linked fields
 }
 
 func newKeyQuery(s string) keyQuery {
@@ -216,7 +217,11 @@ func (q keyQuery) match(key []byte) bool {
 	if strings.Contains(hex.EncodeToString(key), q.hex) || strings.Contains(decode(key), q.raw) {
 		return true
 	}
-	return q.format != nil && strings.Contains(strings.ToLower(q.format.format(key)), q.raw)
+	n := linkNote(q.links, 0, key, nil)
+	if q.format == nil && n == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(formatOrHexNoted(q.format, key, n)), q.raw)
 }
 
 // filterChunks returns the global indices of matching keys in chunks[from:].

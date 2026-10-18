@@ -239,12 +239,19 @@ func TestFormatEditorFlow(t *testing.T) {
 		t.Fatalf("expected hex without a format:\n%s\n%s", out, m.status())
 	}
 
-	// Wrong size is rejected and nothing is saved.
+	// Wrong size is rejected; enter never closes the editor.
 	m = press(m, "e", "__u32", "enter")
 	if m.fmtEdit == nil || !strings.Contains(m.fmtEdit.errs[0], "4 bytes but the map's key is 8 bytes") {
 		t.Fatalf("expected size error, editor=%+v", m.fmtEdit)
 	}
-	m = press(m, "esc", "e", "struct {int a; int b;}", "enter")
+	// esc always leaves, saving only what is valid, and says what wasn't.
+	m = press(m, "esc")
+	if m.fmtEdit != nil || m.formats.get(m.curMap).key != nil || m.err == nil ||
+		!strings.Contains(m.err.Error(), "not saved: key format: definition is 4 bytes") {
+		t.Fatalf("esc with an invalid key: editor=%v err=%v", m.fmtEdit, m.err)
+	}
+	m.err = nil
+	m = press(m, "e", "struct {int a; int b;}", "esc")
 	if m.fmtEdit != nil {
 		t.Fatalf("editor still open: %v", m.fmtEdit.errs)
 	}

@@ -123,6 +123,9 @@ loading entries… 3 / ~2400000 (0%) • 1 match • row 1/1 • [FORMAT]
 
 `[e]` allows you to define C structs for a map's key and/or value. They are checked against the map's
 sizes and saved by map name, so they apply again after the program is reloaded (see [Format storage](#format-storage)).
+`[↑/↓]` move through Key, Value and the [link](#keybind-links) fields. `[esc]` always saves and goes back: to undo a
+change, clear the field (empty = hex) or pick `(no link)`. A definition with an error keeps the one saved before (and
+a link that doesn't fit is dropped); the status line says what wasn't saved.
 
 ```
 ╭──────────────────────────────────────────────────────────────────────────────────────────────╮
@@ -142,10 +145,65 @@ sizes and saved by map name, so they apply again after the program is reloaded (
 │ extras: ipv4 ipv6 mac, x8…x64 (hex); arrays a[N], nested struct/union, pointers              │
 │ attrs:  __attribute__((packed)), __attribute__((aligned(N)))                                 │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
-[tab] switch key/value  [enter] save  [esc] cancel
+[↑/↓] move  [esc] save & back
 ```
 
 Note that IPs are correctly formatted as human readable: `1.2.3.4`
+
+## Keybind: Links
+
+Links translate IDs: a field of the format is looked up as a key in another map, and the value found there is shown
+in place, right after the field. For example, a `flows` map holding a `backend_id` linked to a `backends` map
+(`backend_id → ip, port`) shows each flow's backend address.
+
+Links are part of the format editor (`[e]`): below Key and Value, it lists every field of the key and value formats,
+plus the whole key and value. Fields follow the formats as you type them. `[↓]` down to a field and `[enter]` opens a
+popup listing every loaded map; type to filter, `[enter]` to link. Maps whose key size doesn't fit the field are
+greyed out and refused; a smaller host-order integer is widened to the map's key size (a `__u16` id can look up a
+`__u32` key). `[backspace]` removes a link, and `[esc]` saves the format and its links together.
+
+```
+╭──────────────────────────────────────────────────────────────────────────────────────────────╮
+│ Format for map 12 "flows" (key 8B, value 16B)                                                │
+│ s╭────────────────────────────────────────────────────────────────────────────────────────╮  │
+│  │ Link key.backend_id (4B) to                                                            │  │
+│  │ /back                                                                                  │  │
+│  │ (no link)                                                                              │  │
+│  │ backends             14  Hash         key   4B  value    8B •                          │  │
+│  │ backends_v6          31  Hash         key   4B  value   20B                            │  │
+│  │ 2 maps • used by this program • greyed: key size doesn't fit                           │  │
+│  ╰────────────────────────────────────────────────────────────────────────────────────────╯  │
+│   ✓ 16 bytes                                                                                 │
+│                                                                                              │
+│ ▸ Links  a linked field is looked up as a key in that map and the value found there is shown │
+│     Field            Size  Linked map                                                        │
+│     key                8B                                                                    │
+│   ▸ key.backend_id     4B  backends ✓                                                        │
+│     key.port           4B                                                                    │
+│     value             16B                                                                    │
+│     value.packets      8B                                                                    │
+│     value.bytes        8B                                                                    │
+│   ✓ map 14 "backends": key 4B, value 8B                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────╯
+[↑/↓] move  [type] filter  [enter] link  [esc] close
+```
+
+Each linked field is then followed by its translation, formatted with the linked map's own format, in the Key or
+Value column (titled `Key (linked)` / `Value (linked)`) and in the entry view. `[/]` search matches the key's translations
+too, so `/10.0.0.5` finds the flows going to that backend:
+
+```
+ #         Key (linked)                                     Value
+──────────────────────────────────────────────────────────────────────────────────────────────────
+ 0         backend_id=3→{ip=10.0.0.5 port=80} port=443      {packets=12 bytes=1600}
+ 1         backend_id=9→(not found) port=80                 {packets=22 bytes=3100}
+```
+
+Links are saved with the format, in the same entry as its key and value (the `links` field, see
+[Format storage](#format-storage)), by map name on both ends, so
+[bundling the formats into the binary](#formats-bundled-in-the-binary) carries the links too. When several loaded
+maps share the linked name, the one used by the current program wins (`•` in the popup), else the most recently
+loaded. Value fields of per-CPU maps are looked up from CPU 0's copy. `[r]` reads the linked maps again.
 
 ## Format storage
 
@@ -169,7 +227,8 @@ Both files have the same layout, keyed by map name:
   "maps": {
     "flows": {
       "key": "struct { ipv4 saddr; __be16 sport; __u8 proto; __u32 ifindex; }",
-      "value": "struct { __u64 packets; __u64 bytes; }"
+      "value": "struct { __u64 packets; __u64 bytes; }",
+      "links": { "key.saddr": "hosts" }
     }
   }
 }

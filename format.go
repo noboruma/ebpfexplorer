@@ -497,24 +497,58 @@ func (t *ctype) putUint(b []byte, v uint64) {
 
 // format renders b (exactly t.size bytes) on one line. Top-level structs
 // are rendered without braces: "a=1 b=2".
-func (t *ctype) format(b []byte) string {
-	if t.kind == kStruct || t.kind == kUnion {
-		return strings.Join(t.fieldStrings(b), " ")
+func (t *ctype) format(b []byte) string { return t.formatNoted(b, nil) }
+
+// note returns extra text shown right after the leaf at path (a path of
+// leaves(), "" for a scalar type), e.g. what a linked field translates to.
+type note func(path string) string
+
+func (n note) of(path string) string {
+	if n == nil {
+		return ""
 	}
-	return t.formatValue(b)
+	return n(path)
 }
 
-func (t *ctype) fieldStrings(b []byte) []string {
+// formatNoted is format with each leaf followed by its note.
+func (t *ctype) formatNoted(b []byte, n note) string {
+	if t.kind == kStruct || t.kind == kUnion {
+		return strings.Join(t.fieldStrings("", b, n), " ")
+	}
+	return t.notedValue("", b, n)
+}
+
+func (t *ctype) fieldStrings(prefix string, b []byte, n note) []string {
 	var out []string
 	for _, f := range t.fields {
 		fb := b[f.off:][:f.t.size]
 		if f.name == "" { // anonymous member: inline its fields
-			out = append(out, f.t.fieldStrings(fb)...)
+			out = append(out, f.t.fieldStrings(prefix, fb, n)...)
 			continue
 		}
-		out = append(out, f.name+"="+f.t.formatValue(fb))
+		out = append(out, f.name+"="+f.t.notedValue(joinPath(prefix, f.name), fb, n))
 	}
 	return out
+}
+
+// notedValue is formatValue with notes, walking the same paths as leaves().
+func (t *ctype) notedValue(path string, b []byte, n note) string {
+	if n == nil {
+		return t.formatValue(b)
+	}
+	switch t.kind {
+	case kStruct, kUnion:
+		return "{" + strings.Join(t.fieldStrings(path, b, n), " ") + "}"
+	case kArray:
+		if e := t.elem; e.kind == kStruct || e.kind == kUnion || e.kind == kArray {
+			parts := make([]string, t.n)
+			for i := range parts {
+				parts[i] = e.notedValue(fmt.Sprintf("%s[%d]", path, i), b[i*e.size:][:e.size], n)
+			}
+			return "[" + strings.Join(parts, " ") + "]"
+		}
+	}
+	return t.formatValue(b) + n(path)
 }
 
 func (t *ctype) formatValue(b []byte) string {
@@ -562,38 +596,61 @@ func (t *ctype) formatValue(b []byte) string {
 		}
 		return "[" + strings.Join(parts, " ") + "]"
 	case kStruct, kUnion:
-		return "{" + strings.Join(t.fieldStrings(b), " ") + "}"
+		return "{" + strings.Join(t.fieldStrings("", b, nil), " ") + "}"
 	}
 	return "?"
 }
 
-// lines renders one "path = value" line per leaf, for the detail view.
-func (t *ctype) lines(prefix string, b []byte) []string {
+// leaf is a field shown on its own line in the detail view.
+type leaf struct {
+	path string // "ip", "stats.packets", "slots[1].id"; empty for a scalar type
+	off  int
+	t    *ctype
+}
+
+// leaves lists the fields lines() prints, with their offsets.
+func (t *ctype) leaves(prefix string, off int) []leaf {
 	switch t.kind {
 	case kStruct, kUnion:
-		var out []string
+		var out []leaf
 		for _, f := range t.fields {
 			p := prefix
 			if f.name != "" {
 				p = joinPath(prefix, f.name)
 			}
-			out = append(out, f.t.lines(p, b[f.off:][:f.t.size])...)
+			out = append(out, f.t.leaves(p, off+f.off)...)
 		}
 		return out
 	case kArray:
 		e := t.elem
 		if e.kind == kStruct || e.kind == kUnion || e.kind == kArray {
-			var out []string
+			var out []leaf
 			for i := 0; i < t.n; i++ {
-				out = append(out, e.lines(fmt.Sprintf("%s[%d]", prefix, i), b[i*e.size:][:e.size])...)
+				out = append(out, e.leaves(fmt.Sprintf("%s[%d]", prefix, i), off+i*e.size)...)
 			}
 			return out
 		}
 	}
-	if prefix == "" {
-		prefix = "value"
+	return []leaf{{prefix, off, t}}
+}
+
+// lines renders one "path = value" line per leaf, for the detail view.
+func (t *ctype) lines(prefix string, b []byte) []string { return t.linesNoted(prefix, b, nil) }
+
+func (t *ctype) linesNoted(prefix string, b []byte, n note) []string {
+	var out []string
+	for _, l := range t.leaves(prefix, 0) {
+		p := l.path
+		if p == "" {
+			p = "value"
+		}
+		v := l.t.formatValue(b[l.off:][:l.t.size])
+		if n != nil {
+			v += n(l.path)
+		}
+		out = append(out, p+" = "+v)
 	}
-	return []string{prefix + " = " + t.formatValue(b)}
+	return out
 }
 
 // columns splits lines() into field names and values, for tables with one
@@ -651,6 +708,9 @@ func (t *ctype) walkInts(off int, fn func(*ctype, int)) {
 type formatDef struct {
 	Key   string `json:"key,omitempty"`
 	Value string `json:"value,omitempty"`
+	// Links maps a field ("key", "value", "key.backend_id"...) to the name of
+	// the map its bytes are looked up in (see links.go).
+	Links map[string]string `json:"links,omitempty"`
 }
 
 // formatStore holds the user's format definitions, keyed by map name (map
@@ -849,7 +909,7 @@ func (s *formatStore) def(mp mapRow) formatDef {
 
 func (s *formatStore) set(mp mapRow, d formatDef, c compiledFormat) error {
 	name := formatKey(mp)
-	if d.Key == "" && d.Value == "" {
+	if d.Key == "" && d.Value == "" && len(d.Links) == 0 {
 		delete(s.defs, name)
 		if e, ok := s.embedded[name]; ok {
 			s.compiled[name] = compileDef(e)

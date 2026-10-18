@@ -173,12 +173,12 @@ func TestEmbeddedFormats(t *testing.T) {
 	}
 
 	// Same layout the README's shell commands produce.
-	js := `{"maps": {"conntrack": {"key": "__u32"}, "flows": {"value": "__u64"}}}` + "\n"
+	js := `{"maps": {"conntrack": {"key": "__u32"}, "flows": {"value": "__u64", "links": {"value": "names"}}}}` + "\n"
 	f, _ := os.OpenFile(exe, os.O_APPEND|os.O_WRONLY, 0)
 	fmt.Fprintf(f, "%s%016d%s", js, len(js), embeddedMagic)
 	f.Close()
 	got, err := readEmbeddedFormats(exe)
-	if err != nil || got["conntrack"].Key != "__u32" || got["flows"].Value != "__u64" {
+	if err != nil || got["conntrack"].Key != "__u32" || got["flows"].Value != "__u64" || got["flows"].Links["value"] != "names" {
 		t.Fatalf("embedded: %v, %v", got, err)
 	}
 
@@ -187,6 +187,9 @@ func TestEmbeddedFormats(t *testing.T) {
 	path := filepath.Join(dir, localFormatsFile)
 	s, _ := loadFormats(path)
 	s.setEmbedded(got)
+	if l := s.def(mapRow{Name: "flows"}).Links; l["value"] != "names" {
+		t.Fatalf("embedded links not applied: %v", l)
+	}
 	mp := mapRow{Name: "conntrack"}
 	if c := s.get(mp); c.key == nil || c.key.size != 4 {
 		t.Fatalf("embedded format not applied: %+v", c)
