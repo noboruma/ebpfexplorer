@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/cilium/ebpf"
@@ -149,6 +150,27 @@ func loadMaps(ids []ebpf.MapID) []mapRow {
 	return rows
 }
 
+// listAllMaps returns every map loaded in the kernel, used or not by a
+// listed program (link targets can be any map).
+func listAllMaps() ([]mapRow, error) {
+	var ids []ebpf.MapID
+	var id ebpf.MapID
+	for {
+		next, err := ebpf.MapGetNextID(id)
+		if errors.Is(err, os.ErrNotExist) {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("get next map id: %w", err)
+		}
+		id = next
+		ids = append(ids, id)
+	}
+	rows := loadMaps(ids)
+	// Maps unloaded between the two calls.
+	return slices.DeleteFunc(rows, func(r mapRow) bool { return r.Err != nil }), nil
+}
+
 // countEntries returns how many keys a map holds. Array maps always hold
 // max_entries elements; other maps are walked key by key, which needs no value
 // copies but is still O(n) syscalls.
@@ -273,6 +295,11 @@ func lookupEntry(id ebpf.MapID, key []byte) ([][]byte, error) {
 		return nil, err
 	}
 	defer m.Close()
+	return lookupIn(m, key)
+}
+
+// lookupIn is lookupEntry on an already open map.
+func lookupIn(m *ebpf.Map, key []byte) ([][]byte, error) {
 	if isPerCPU(m.Type()) {
 		var vals [][]byte
 		if err := m.Lookup(key, &vals); err != nil {
