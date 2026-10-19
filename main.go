@@ -2,6 +2,9 @@
 // entries currently loaded in the kernel.
 //
 //	programs ──enter──▶ maps used by program ──enter──▶ map entries ──enter──▶ entry detail
+//	all maps ──enter──────────────────────────────────▶ map entries ──enter──▶ entry detail
+//
+// [p] and [m] switch between the two starting lists.
 //
 // Everything loads in the background: map entries stream in chunks of 1000
 // and the UI stays usable (and searchable) while they arrive.
@@ -49,8 +52,11 @@ type model struct {
 	view          view
 	width, height int
 
-	xdpOnly   bool
+	// allMaps: the maps list is every map loaded in the kernel (opened
+	// with "m"), not the maps of curProg.
+	allMaps   bool
 	filter    textinput.Model // program filter
+	mapFilter textinput.Model // maps filter
 	keyFilter textinput.Model // entry key search
 	editing   bool
 
@@ -63,7 +69,9 @@ type model struct {
 	curProg     progRow
 	mapsLoading bool
 	maps        []mapRow
+	visMaps     []int // indexes into maps matching mapFilter
 	mapPane     pane
+	mapsGen     int // invalidates in-flight map listings
 	mapCols     []column
 
 	// Entries of curMap. The store only ever grows while loading; loadGen
@@ -116,16 +124,19 @@ type model struct {
 	holdersDone bool
 }
 
-func initialModel(xdpOnly bool) model {
+func initialModel(allMaps bool) model {
 	fi := textinput.New()
 	fi.Prompt = "/"
 	fi.Placeholder = "filter by name/type/id"
+	mf := textinput.New()
+	mf.Prompt = "/"
+	mf.Placeholder = "filter by name/type/id"
 	kf := textinput.New()
 	kf.Prompt = "/"
 	kf.Placeholder = "search key: hex (0a000001 / 0a 00 00 01), decimal or IP"
 	m := model{
-		xdpOnly:      xdpOnly,
 		filter:       fi,
+		mapFilter:    mf,
 		keyFilter:    kf,
 		progsLoading: true,
 		searchGen:    new(atomic.Int64),
@@ -150,6 +161,9 @@ func initialModel(xdpOnly bool) model {
 	m.width, m.height = 80, 24
 	m.resize()
 	m.width = 0 // View shows "loading…" until the real size arrives
+	if allMaps {
+		m.showAllMaps()
+	}
 	return m
 }
 
@@ -159,7 +173,11 @@ type progsLoaded struct {
 	rows []progRow
 	err  error
 }
-type mapsLoaded struct{ rows []mapRow }
+type mapsLoaded struct {
+	gen  int
+	rows []mapRow
+	err  error
+}
 type mapCounted struct {
 	id  ebpf.MapID
 	n   int
@@ -192,8 +210,23 @@ func loadProgsCmd() tea.Msg {
 	return progsLoaded{rows, err}
 }
 
-func loadMapsCmd(ids []ebpf.MapID) tea.Cmd {
-	return func() tea.Msg { return mapsLoaded{loadMaps(ids)} }
+// loadMapsCmd loads the maps list: curProg's maps, or every map.
+func (m *model) loadMapsCmd() tea.Cmd {
+	m.mapsGen++
+	m.mapsLoading = true
+	return m.listMapsCmd()
+}
+
+// listMapsCmd lists the maps for the current mapsGen.
+func (m model) listMapsCmd() tea.Cmd {
+	gen, all, ids := m.mapsGen, m.allMaps, m.curProg.MapIDs
+	return func() tea.Msg {
+		if all {
+			rows, err := listAllMaps()
+			return mapsLoaded{gen, rows, err}
+		}
+		return mapsLoaded{gen, loadMaps(ids), nil}
+	}
 }
 
 func countMapsCmd(rows []mapRow) tea.Cmd {
@@ -239,6 +272,9 @@ func (m *model) loadHolders() tea.Cmd {
 	var scan func() []string
 	switch m.view {
 	case viewMaps:
+		if m.allMaps {
+			return nil
+		}
 		progID := m.curProg.ID
 		key, scan = fmt.Sprintf("prog:%d", progID), func() []string { return programHolders(progID) }
 	case viewEntries:
@@ -261,7 +297,13 @@ func searchCmd(s entryStore, q keyQuery, gen *atomic.Int64, want int64) tea.Cmd 
 	}
 }
 
-func (m model) Init() tea.Cmd { return loadProgsCmd }
+func (m model) Init() tea.Cmd {
+	if m.allMaps {
+		// The programs are still loaded: they tell which programs use a map.
+		return tea.Batch(loadProgsCmd, m.listMapsCmd())
+	}
+	return loadProgsCmd
+}
 
 // --- update ---
 
@@ -279,9 +321,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case mapsLoaded:
+		if msg.gen != m.mapsGen {
+			return m, nil
+		}
 		m.mapsLoading = false
 		m.maps = msg.rows
-		m.mapPane.clamp(len(m.maps), m.listRows()) // keeps the cursor on refresh
+		if msg.err != nil {
+			m.err = msg.err
+		}
+		m.applyMapFilter() // keeps the cursor on refresh
 		return m, countMapsCmd(m.maps)
 
 	case entryRefreshed:
@@ -384,12 +432,14 @@ func (m model) handleKey(key string) (tea.Model, tea.Cmd) {
 			// Every loaded map, to check and pick link targets.
 			return m, tea.Batch(textinput.Blink, listMapsCmd)
 		}
-	case "x":
-		if m.view == viewProgs {
-			m.xdpOnly = !m.xdpOnly
-			m.applyProgFilter()
-			return m, nil
-		}
+	case "p":
+		m.leaveToRoot()
+		m.view, m.allMaps = viewProgs, false
+		m.progsLoading = true
+		return m, loadProgsCmd
+	case "m":
+		m.leaveToRoot()
+		return m, m.showAllMaps()
 	case "/":
 		if f := m.activeFilter(); f != nil {
 			m.editing = true
@@ -450,10 +500,39 @@ func (m model) onChunk(msg chunkLoaded) (tea.Model, tea.Cmd) {
 	return m, readChunkCmd(m.curMap.ID, l, m.loadGen)
 }
 
+// leaveToRoot stops what the current view loads before jumping to one of
+// the two starting lists.
+func (m *model) leaveToRoot() {
+	if m.view >= viewEntries {
+		m.stopEntries()
+	}
+	m.err = nil
+	m.refreshedAt = time.Time{}
+	m.holders, m.holdersFor, m.holdersDone = nil, "", false
+}
+
+// showAllMaps opens the list of every map loaded in the kernel.
+func (m *model) showAllMaps() tea.Cmd {
+	m.view, m.allMaps = viewMaps, true
+	m.curProg = progRow{}
+	m.maps, m.visMaps, m.mapPane = nil, nil, pane{}
+	m.mapFilter.SetValue("")
+	return m.loadMapsCmd()
+}
+
+// atRoot reports whether the current view is a starting list.
+func (m model) atRoot() bool {
+	return m.view == viewProgs || m.view == viewMaps && m.allMaps
+}
+
 func (m model) back() (tea.Model, tea.Cmd) {
 	// Clear an active search before leaving the view.
 	switch {
-	case m.view == viewProgs:
+	case m.view == viewMaps && m.mapFilter.Value() != "":
+		m.mapFilter.SetValue("")
+		m.applyMapFilter()
+		return m, nil
+	case m.atRoot():
 		if m.filter.Value() != "" {
 			m.filter.SetValue("")
 			m.applyProgFilter()
@@ -466,6 +545,11 @@ func (m model) back() (tea.Model, tea.Cmd) {
 		m.stopEntries()
 	}
 	m.view--
+	if m.view == viewMaps && m.allMaps {
+		// The maps were not opened from a program.
+		m.err, m.refreshedAt = nil, time.Time{}
+		return m, nil
+	}
 	m.err = nil
 	m.refreshedAt = time.Time{}
 	if m.view == viewMaps {
@@ -484,8 +568,7 @@ func (m model) refresh() (tea.Model, tea.Cmd) {
 		m.progsLoading = true
 		return m, loadProgsCmd
 	case viewMaps:
-		m.mapsLoading = true
-		return m, tea.Batch(loadMapsCmd(m.curProg.MapIDs), m.loadHolders())
+		return m, tea.Batch(m.loadMapsCmd(), m.loadHolders())
 	case viewEntries:
 		p := m.entryPane
 		cmd := m.startEntries()
@@ -517,6 +600,8 @@ func (m *model) activeFilter() *textinput.Model {
 	switch m.view {
 	case viewProgs:
 		return &m.filter
+	case viewMaps:
+		return &m.mapFilter
 	case viewEntries:
 		return &m.keyFilter
 	}
@@ -536,8 +621,12 @@ func (m model) updateFilter(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	default:
 		*f, cmd = f.Update(msg)
 	}
-	if m.view == viewProgs {
+	switch m.view {
+	case viewProgs:
 		m.applyProgFilter()
+		return m, cmd
+	case viewMaps:
+		m.applyMapFilter()
 		return m, cmd
 	}
 	if newKeyQuery(m.keyFilter.Value()).raw == m.query.raw {
@@ -550,9 +639,6 @@ func (m *model) applyProgFilter() {
 	q := strings.ToLower(m.filter.Value())
 	m.visProgs = m.visProgs[:0]
 	for _, p := range m.progs {
-		if m.xdpOnly && p.Type != ebpf.XDP {
-			continue
-		}
 		if q != "" {
 			hay := strings.ToLower(fmt.Sprintf("%d %s %s %s", p.ID, p.Name, p.Type, p.Attached))
 			if !strings.Contains(hay, q) {
@@ -562,6 +648,30 @@ func (m *model) applyProgFilter() {
 		m.visProgs = append(m.visProgs, p)
 	}
 	m.progPane.clamp(len(m.visProgs), m.listRows())
+}
+
+func (m *model) applyMapFilter() {
+	q := strings.ToLower(m.mapFilter.Value())
+	m.visMaps = m.visMaps[:0]
+	for i, r := range m.maps {
+		if q != "" {
+			hay := strings.ToLower(fmt.Sprintf("%d %s %s", r.ID, r.Name, r.Type))
+			if !strings.Contains(hay, q) {
+				continue
+			}
+		}
+		m.visMaps = append(m.visMaps, i)
+	}
+	m.mapPane.clamp(len(m.visMaps), m.listRows())
+}
+
+// curMapRow is the map under the cursor of the maps list.
+func (m model) curMapRow() (mapRow, bool) {
+	i := m.mapPane.cur
+	if i < 0 || i >= len(m.visMaps) {
+		return mapRow{}, false
+	}
+	return m.maps[m.visMaps[i]], true
 }
 
 // applyKeyFilter starts a background rescan for the current key query.
@@ -637,17 +747,17 @@ func (m model) drillDown() (tea.Model, tea.Cmd) {
 		}
 		m.curProg = m.visProgs[i]
 		m.view = viewMaps
-		m.maps = nil
-		m.mapsLoading = true
+		m.maps, m.visMaps = nil, nil
+		m.mapFilter.SetValue("")
 		m.mapPane = pane{}
-		return m, tea.Batch(loadMapsCmd(m.curProg.MapIDs), m.loadHolders())
+		return m, tea.Batch(m.loadMapsCmd(), m.loadHolders())
 
 	case viewMaps:
-		i := m.mapPane.cur
-		if i < 0 || i >= len(m.maps) {
+		row, ok := m.curMapRow()
+		if !ok {
 			return m, nil
 		}
-		m.curMap = m.maps[i]
+		m.curMap = row
 		if m.curMap.Err != nil {
 			m.err = m.curMap.Err
 			return m, nil
@@ -695,6 +805,9 @@ func (m *model) curPane() *pane {
 func (m model) headerLines() []string {
 	switch m.view {
 	case viewMaps:
+		if m.allMaps {
+			return nil
+		}
 		return []string{labelStyle.Render("attached: ") + attachedOrNone(m.curProg.Attached) +
 			crumbStyle.Render("  •  ") + labelStyle.Render("processes: ") + m.holdersText()}
 	case viewEntries:
@@ -767,7 +880,7 @@ func (m model) cpuTable() tableSpec {
 }
 
 // hasInputLine reports whether the screen reserves a line for its filter.
-func (m model) hasInputLine() bool { return m.view == viewProgs || m.view == viewEntries }
+func (m model) hasInputLine() bool { return m.view != viewDetail }
 
 // listRows is how many list rows fit under the header lines, the filter line
 // and the column titles (2 lines) in the body (height - title/status/help).
@@ -793,11 +906,16 @@ func (m model) table() (tableSpec, bool) {
 			row: func(i int) []string { return progFields(m.visProgs[i]) }}, true
 	case viewMaps:
 		empty := "this program does not reference any maps"
-		if m.mapsLoading {
+		switch {
+		case m.mapsLoading:
 			empty = "loading…"
+		case m.mapFilter.Value() != "":
+			empty = "(no maps match)"
+		case m.allMaps:
+			empty = "(no maps)"
 		}
-		return tableSpec{cols: m.mapCols, n: len(m.maps), empty: empty,
-			row: func(i int) []string { return m.mapFields(m.maps[i]) }}, true
+		return tableSpec{cols: m.mapCols, n: len(m.visMaps), empty: empty,
+			row: func(i int) []string { return m.mapFields(m.maps[m.visMaps[i]]) }}, true
 	case viewEntries:
 		empty := "(no entries)"
 		switch {
@@ -1063,9 +1181,8 @@ func (m model) formatsFor(mp mapRow) (key, value *ctype) {
 func (m model) formatTarget() (mapRow, bool) {
 	switch m.view {
 	case viewMaps:
-		i := m.mapPane.cur
-		if i >= 0 && i < len(m.maps) && m.maps[i].Err == nil {
-			return m.maps[i], true
+		if r, ok := m.curMapRow(); ok && r.Err == nil {
+			return r, true
 		}
 	case viewEntries, viewDetail:
 		return m.curMap, true
@@ -1133,7 +1250,9 @@ func (m model) View() string {
 	var b strings.Builder
 
 	crumbs := []string{"programs"}
-	if m.view >= viewMaps {
+	if m.allMaps {
+		crumbs = []string{"all maps"}
+	} else if m.view >= viewMaps {
 		crumbs = append(crumbs, fmt.Sprintf("prog %d %s", m.curProg.ID, m.curProg.Name))
 	}
 	if m.view >= viewEntries {
@@ -1143,9 +1262,6 @@ func (m model) View() string {
 		crumbs = append(crumbs, "entry")
 	}
 	title := "eBPF explorer"
-	if m.view == viewProgs && m.xdpOnly {
-		title += " · XDP only"
-	}
 	b.WriteString(titleStyle.Render(title) + " " + crumbStyle.Render(strings.Join(crumbs, " › ")) + "\n")
 
 	var body []string
@@ -1155,10 +1271,7 @@ func (m model) View() string {
 		body = append(body, scrollLine(l, p.hOff, width))
 	}
 	if m.hasInputLine() {
-		f := m.filter
-		if m.view == viewEntries {
-			f = m.keyFilter
-		}
+		f := *m.activeFilter()
 		if m.editing || f.Value() != "" {
 			body = append(body, f.View())
 		} else {
@@ -1215,10 +1328,13 @@ func (m model) scopeStatus() string {
 		}
 		return fmt.Sprintf("%d programs", len(m.progs))
 	case viewMaps:
-		if m.mapsLoading {
+		switch {
+		case m.mapsLoading:
 			return "loading maps…"
+		case m.mapFilter.Value() != "":
+			return fmt.Sprintf("%d/%d maps", len(m.visMaps), len(m.maps))
 		}
-		return ""
+		return fmt.Sprintf("%d maps", len(m.maps))
 	case viewDetail:
 		if m.entryReload {
 			return "refreshing entry…"
@@ -1264,9 +1380,11 @@ func (m model) help() string {
 	case m.editing:
 		keys = [][2]string{{"enter", "apply"}, {"esc", "clear"}}
 	case m.view == viewProgs:
-		keys = [][2]string{{"↑/↓", "move"}, {"←/→", "scroll"}, {"enter", "open"}, {"x", "XDP only"}, {"/", "filter"}, {"r", "refresh programs"}, {"q", "quit"}}
+		keys = [][2]string{{"↑/↓", "move"}, {"←/→", "scroll"}, {"enter", "open"}, {"/", "filter"}, {"m", "all maps"}, {"r", "refresh programs"}, {"q", "quit"}}
+	case m.view == viewMaps && m.allMaps:
+		keys = [][2]string{{"↑/↓", "move"}, {"←/→", "scroll"}, {"enter", "open"}, {"/", "filter"}, {"e", "edit format"}, {"p", "programs"}, {"r", "refresh maps"}, {"q", "quit"}}
 	case m.view == viewMaps:
-		keys = [][2]string{{"↑/↓", "move"}, {"←/→", "scroll"}, {"enter", "open"}, {"e", "edit format"}, {"esc", "back"}, {"r", "refresh maps"}, {"q", "quit"}}
+		keys = [][2]string{{"↑/↓", "move"}, {"←/→", "scroll"}, {"enter", "open"}, {"/", "filter"}, {"e", "edit format"}, {"esc", "back"}, {"r", "refresh maps"}, {"q", "quit"}}
 	case m.view == viewEntries:
 		keys = [][2]string{{"↑/↓ pgup/pgdn g/G", "move"}, {"←/→", "scroll"}, {"enter", "open"}, {"/", "search"}, {"e", "edit format"}, {"esc", "back"}, {"r", "refresh map"}, {"q", "quit"}}
 	case m.view == viewDetail && m.perCPUDetail():
@@ -1282,7 +1400,7 @@ func (m model) help() string {
 }
 
 func main() {
-	xdp := flag.Bool("xdp", false, "start with only XDP programs shown")
+	maps := flag.Bool("maps", false, "start on the list of all maps instead of the programs")
 	flag.BoolVar(&useGlobalConfig, "global-config", false,
 		"load/store formats in $XDG_CONFIG_HOME/ebpfexplorer/formats.json instead of "+localFormatsFile+" next to the binary")
 	flag.Parse()
@@ -1291,7 +1409,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "warning: not running as root; listing BPF objects usually needs CAP_SYS_ADMIN/CAP_BPF")
 	}
 
-	p := tea.NewProgram(initialModel(*xdp), tea.WithAltScreen())
+	p := tea.NewProgram(initialModel(*maps), tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

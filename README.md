@@ -29,7 +29,8 @@ Same keys on every screen: `[↑/↓]` move, `[←/→]` scroll sideways to read
 
 ## Programs Explorer (Root View)
 
-Shows every loaded BPF program and where it is attached. `[x]` toggles XDP only, `[/]` filters on name.
+Shows every loaded BPF program and where it is attached. `[/]` filters on name, `[m]` switches to the
+[list of all maps](#all-maps).
 
 ```
  eBPF explorer  programs
@@ -40,7 +41,7 @@ Shows every loaded BPF program and where it is attached. `[x]` toggles XDP only,
  57      trace_connect        Kprobe         1     9988776655443322
  10122   sd_devices           CGroupDevice   0     ee0e253c78993a24  cgroup/device@systemd-udev…
 4 programs
-[↑/↓] move  [←/→] scroll  [enter] open  [x] XDP only  [/] filter  [r] refresh programs  [q] quit
+[↑/↓] move  [←/→] scroll  [enter] open  [/] filter  [m] all maps  [r] refresh programs  [q] quit
 ```
 
 ## Maps Explorer
@@ -55,7 +56,24 @@ attached: xdp@eth0 (native)  •  processes: proxy-agent (pid 2211)
 ─────────────────────────────────────────────────────────────────────────────────────────────────
  12      flows               PerCPUHash      12    16     10000000    counting…   0x0    key+val
  13      blocklist           LPMTrie         8     4      65536       1532        0x0
-[↑/↓] move  [←/→] scroll  [enter] open  [e] edit format  [esc] back  [r] refresh maps  [q] quit
+[↑/↓] move  [←/→] scroll  [enter] open  [/] filter  [e] edit format  [esc] back  [r] refresh maps  [q] quit
+```
+
+## All Maps
+
+`[m]` (or `sudo ./ebpfexplorer -maps` to start there) lists every map loaded in the kernel, including maps
+no program uses, such as maps only held open or pinned by a process. Entries open from it the same way;
+`[esc]` from the entries comes back here, and `[p]` returns to the programs.
+
+```
+ eBPF explorer  all maps
+ ID      Name                Type            Key   Value  MaxEntries  Entries     Flags  Format
+─────────────────────────────────────────────────────────────────────────────────────────────────
+ 12      flows               PerCPUHash      12    16     10000000    counting…   0x0    key+val
+ 13      blocklist           LPMTrie         8     4      65536       1532        0x0
+ 30      pp_id_2_user_id     Hash            4     4      1024        87          0x0
+3 maps
+[↑/↓] move  [←/→] scroll  [enter] open  [/] filter  [e] edit format  [p] programs  [r] refresh maps  [q] quit
 ```
 
 ## Entries Explorer
