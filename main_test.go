@@ -475,3 +475,61 @@ func TestPerCPUEntryTable(t *testing.T) {
 		t.Fatalf("cpu1 row after refresh = %v", got)
 	}
 }
+
+func TestAllMapsList(t *testing.T) {
+	m := initialModel(false)
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 140, Height: 20})
+	m = next.(model)
+	next, _ = m.Update(progsLoaded{rows: []progRow{{ID: 41, Name: "xdp_filter", Type: ebpf.XDP, MapIDs: []ebpf.MapID{12}}}})
+	m = next.(model)
+	m = press(m, "enter") // the program's maps, still loading
+	stale := mapsLoaded{gen: m.mapsGen, rows: []mapRow{{ID: 12, Name: "flows"}}}
+
+	m = press(m, "m")
+	if m.view != viewMaps || !m.allMaps || !m.mapsLoading {
+		t.Fatalf("m opens the list of all maps: view=%v allMaps=%v", m.view, m.allMaps)
+	}
+	next, _ = m.Update(stale)
+	if m = next.(model); len(m.maps) != 0 {
+		t.Fatal("a late listing of the program's maps must be dropped")
+	}
+	next, _ = m.Update(mapsLoaded{gen: m.mapsGen, rows: []mapRow{
+		{ID: 12, Name: "flows", Type: ebpf.Hash, KeySize: 4, ValueSize: 8},
+		{ID: 30, Name: "pp_id_2_user_id", Type: ebpf.Hash, KeySize: 4, ValueSize: 4},
+	}})
+	m = next.(model)
+	if v := m.View(); !strings.Contains(v, "all maps") || !strings.Contains(v, "pp_id_2_user_id") || !strings.Contains(v, "2 maps") {
+		t.Fatalf("all maps view:\n%s", v)
+	}
+
+	// / filters; esc clears the filter, then stays: this is a starting list.
+	m = press(m, "/", "user", "enter")
+	if r, ok := m.curMapRow(); len(m.visMaps) != 1 || !ok || r.ID != 30 {
+		t.Fatalf("filter: %v", m.visMaps)
+	}
+	m = press(m, "esc")
+	if len(m.visMaps) != 2 || m.view != viewMaps {
+		t.Fatal("esc clears the maps filter")
+	}
+	m = press(m, "esc")
+	if m.view != viewMaps || !m.allMaps {
+		t.Fatal("esc on the all maps list stays there")
+	}
+
+	// A map opened from it goes back to it.
+	m = press(m, "down", "enter")
+	if m.view != viewEntries || m.curMap.ID != 30 {
+		t.Fatalf("view=%v map=%d", m.view, m.curMap.ID)
+	}
+	if m = press(m, "esc"); m.view != viewMaps || !m.allMaps || len(m.maps) != 2 {
+		t.Fatal("esc from the entries goes back to all maps")
+	}
+
+	m = press(m, "p")
+	if m.view != viewProgs || m.allMaps {
+		t.Fatalf("p goes back to the programs: view=%v allMaps=%v", m.view, m.allMaps)
+	}
+	if v := m.View(); !strings.Contains(v, "[m] all maps") {
+		t.Fatalf("programs help:\n%s", v)
+	}
+}
