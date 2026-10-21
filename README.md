@@ -32,7 +32,7 @@ To ship a config within your binary, see below.
 ## Programs Explorer (Root View)
 
 Shows every loaded BPF program and where it is attached. `[/]` filters on name, `[m]` switches to the
-[list of all maps](#all-maps).
+[list of all maps](#all-maps), `[d]` shows the program's [code](#code-explorer).
 
 ```
  eBPF explorer  programs
@@ -43,8 +43,36 @@ Shows every loaded BPF program and where it is attached. `[/]` filters on name, 
  57      trace_connect        Kprobe         1     9988776655443322
  10122   sd_devices           CGroupDevice   0     ee0e253c78993a24  cgroup/device@systemd-udev…
 4 programs
-[↑/↓] move  [←/→] scroll  [enter] open  [/] filter  [m] all maps  [r] refresh programs  [q] quit
+[↑/↓] move  [←/→] scroll  [enter] open  [d] code  [/] filter  [m] all maps  [r] refresh programs  [q] quit
 ```
+
+## Code Explorer
+
+`[d]` on a program (or on its maps screen) shows its instructions as the kernel runs them, after the
+verifier rewrote them, in bpftool's C-like syntax. Each instruction sits next to the C line it was compiled
+from: clang `-g` ships the source lines inside the program's BTF, so no source file is needed. `[enter]` on a
+jump or a bpf-to-bpf call goes to its target.
+
+```
+ eBPF explorer  programs
+prog 41 count_packets  XDP  tag a1b2c3d4e5f60718
+25 instructions (xlated)  •  JIT 151 bytes  •  C source from BTF line info
+ #      Bytes                    Instruction                                  C source
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+                                 count_packets:
+ 0      61 12 00 00 00 00 00 00  r2 = *(u32 *)(r1 +0)                         prog.c:30  __u32 key = bucket(ctx->d…
+ 1      61 11 04 00 00 00 00 00  r1 = *(u32 *)(r1 +4)
+ 2      1c 21 00 00 00 00 00 00  w1 -= w2
+ 3      85 10 00 00 ff ff ff ff  call bucket
+ 9      18 11 00 00 00 00 00 0…  r1 = counts
+ 11     85 00 00 00 01 00 00 00  call bpf_map_lookup_elem
+ 12     15 00 02 00 00 00 00 00  if r0 == 0x0 goto pc+2                       prog.c:32  if (n) {
+ 13     db 60 00 00 01 00 00 00  r6 = atomic64_fetch_add((u64 *)(r0 +0), r6)  prog.c:33  __sync_fetch_and_add(n, 1);
+row 12/28 • jumps to 15 [enter]
+[↑/↓ pgup/pgdn g/G] move  [←/→] scroll  [enter] follow jump/call  [esc] back  [r] reload  [q] quit
+```
+
+Reading instructions needs root; the C column stays empty for programs built without `-g`.
 
 ## Maps Explorer
 

@@ -91,6 +91,9 @@ type tableSpec struct {
 	n     int
 	row   func(i int) []string
 	empty string // shown when n == 0
+	// paint, if set, styles cell c of row i once it is cut to width (not on
+	// the selected row, which is drawn in one style).
+	paint func(i, c int, s string) string
 }
 
 // render draws the header and the rows on screen only, so it costs the same
@@ -111,7 +114,11 @@ func (t tableSpec) render(p pane, rows int) string {
 			if c > 0 {
 				f = scrollLeft(f, p.hOff, t.cols[c].width)
 			}
-			line.WriteString(cell(f, t.cols[c].width))
+			s := cell(f, t.cols[c].width)
+			if t.paint != nil && r != p.cur {
+				s = t.paint(r, c, s)
+			}
+			line.WriteString(s)
 		}
 		if r == p.cur {
 			b.WriteString(selectedStyle.Render(line.String()))

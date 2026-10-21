@@ -112,6 +112,9 @@ type model struct {
 	formats *formatStore
 	fmtEdit *fmtEditor
 
+	// code is the open code view ([d]) of a program, if any.
+	code *codeView
+
 	// Links of curMap (see links.go); linkGen invalidates in-flight
 	// resolutions.
 	links   []*mapLink
@@ -381,6 +384,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case codeLoaded:
+		if m.code != nil && m.code.prog.ID == msg.id {
+			c := m.code
+			c.loading, c.rows, c.info, c.err = false, msg.rows, msg.info, msg.err
+			c.pane.clamp(len(c.rows), m.codeRows())
+		}
+		return m, nil
+
 	case searchDone:
 		if msg.gen != m.searchGen.Load() {
 			return m, nil
@@ -394,6 +405,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		if m.fmtEdit != nil {
 			return m.updateFmtEditor(msg)
+		}
+		if m.code != nil {
+			return m.updateCode(msg.String())
 		}
 		if m.editing {
 			return m.updateFilter(msg)
@@ -440,6 +454,13 @@ func (m model) handleKey(key string) (tea.Model, tea.Cmd) {
 	case "m":
 		m.leaveToRoot()
 		return m, m.showAllMaps()
+	case "d":
+		switch {
+		case m.view == viewProgs && m.progPane.cur < len(m.visProgs):
+			return m.openCode(m.visProgs[m.progPane.cur])
+		case m.view == viewMaps && !m.allMaps:
+			return m.openCode(m.curProg)
+		}
 	case "/":
 		if f := m.activeFilter(); f != nil {
 			m.editing = true
@@ -1288,12 +1309,18 @@ func (m model) View() string {
 	content := strings.Join(body, "\n")
 	if m.fmtEdit != nil {
 		content = m.fmtEdit.view(m.width-2, m.height-3)
+	} else if m.code != nil {
+		content = m.codeContent()
 	}
 	// Fixed-height body so the footer doesn't jump while data streams in.
 	b.WriteString(lipgloss.NewStyle().Height(m.height - 3).MaxHeight(m.height - 3).Render(content))
 
 	b.WriteString("\n")
 	switch {
+	case m.code != nil && m.code.err != nil:
+		b.WriteString(errStyle.Render("error: " + m.code.err.Error()))
+	case m.code != nil:
+		b.WriteString(statusStyle.Render(m.codeStatus()))
 	case m.err != nil:
 		b.WriteString(errStyle.Render("error: " + m.err.Error()))
 	case m.view >= viewEntries && m.loadErr != nil:
@@ -1377,14 +1404,16 @@ func (m model) help() string {
 	switch {
 	case m.fmtEdit != nil:
 		keys = m.fmtEdit.help()
+	case m.code != nil:
+		keys = m.codeHelp()
 	case m.editing:
 		keys = [][2]string{{"enter", "apply"}, {"esc", "clear"}}
 	case m.view == viewProgs:
-		keys = [][2]string{{"↑/↓", "move"}, {"←/→", "scroll"}, {"enter", "open"}, {"/", "filter"}, {"m", "all maps"}, {"r", "refresh programs"}, {"q", "quit"}}
+		keys = [][2]string{{"↑/↓", "move"}, {"←/→", "scroll"}, {"enter", "open"}, {"d", "code"}, {"/", "filter"}, {"m", "all maps"}, {"r", "refresh programs"}, {"q", "quit"}}
 	case m.view == viewMaps && m.allMaps:
 		keys = [][2]string{{"↑/↓", "move"}, {"←/→", "scroll"}, {"enter", "open"}, {"/", "filter"}, {"e", "edit format"}, {"p", "programs"}, {"r", "refresh maps"}, {"q", "quit"}}
 	case m.view == viewMaps:
-		keys = [][2]string{{"↑/↓", "move"}, {"←/→", "scroll"}, {"enter", "open"}, {"/", "filter"}, {"e", "edit format"}, {"esc", "back"}, {"r", "refresh maps"}, {"q", "quit"}}
+		keys = [][2]string{{"↑/↓", "move"}, {"←/→", "scroll"}, {"enter", "open"}, {"d", "code"}, {"/", "filter"}, {"e", "edit format"}, {"esc", "back"}, {"r", "refresh maps"}, {"q", "quit"}}
 	case m.view == viewEntries:
 		keys = [][2]string{{"↑/↓ pgup/pgdn g/G", "move"}, {"←/→", "scroll"}, {"enter", "open"}, {"/", "search"}, {"e", "edit format"}, {"esc", "back"}, {"r", "refresh map"}, {"q", "quit"}}
 	case m.view == viewDetail && m.perCPUDetail():
