@@ -122,7 +122,7 @@ processes: proxy-agent (pid 2211)
  1         saddr=10.0.0.2 sport=443 proto=6 ifindex=2  {packets=22 bytes=3100}
  2         saddr=10.0.0.3 sport=443 proto=6 ifindex=2  {packets=32 bytes=4600}
 loading entries… 3 / ~2400000 (0%) • row 1/3 • [FORMAT]
-[↑/↓ pgup/pgdn g/G] move  [←/→] scroll  [enter] open  [/] search  [e] edit format  [esc] back  [r] refresh map  [q] quit
+[↑/↓ pgup/pgdn g/G] move  [←/→] scroll  [enter] open  [/] search  [w] write  [e] edit format  [esc] back  [r] refresh map  [q] quit
 ```
 
 Without a format (`[e]` to define one), keys and values are shown in hex format:
@@ -151,8 +151,32 @@ key: saddr=10.0.0.1 sport=443 proto=6 ifindex=2
  0     5                                             900
  1     7                                             700
 [FORMAT]
-[↑/↓] move  [←/→] scroll  [e] edit format  [esc] back  [r] refresh entry  [q] quit
+[↑/↓] move  [←/→] scroll  [w] write CPU  [e] edit format  [esc] back  [r] refresh entry  [q] quit
 ```
+
+## Writing an Entry
+
+Writing is off by default: start with `sudo ./ebpfexplorer --allow-write` (or `-w`) to enable it. Then `[w]` on an
+entry (in the entries list or the entry itself) opens its value for writing: one input per
+field of the value's format, or the value's hex without one. Only the fields you change are written; the
+rest of the value keeps the bytes read. `[enter]` checks the fields, then asks before writing; the entry is
+read back from the kernel once written. The key must still exist: a deleted entry is not created again.
+
+```
+Write map 12 "flows" entry #0 on all 2 CPUs
+key: 0a 00 00 01 01 bb 06 00 02 00 00 00
+
+›  packets u64   differs per CPU: empty keeps each CPU's value
+   bytes u64     0
+
+write 1 changed field(s) to the map on all 2 CPUs? [y] write  [any key] back
+```
+
+Fields take what the screen shows: numbers (`42`, `0x2a`, `-3`), `10.0.0.1`, `fe80::1`,
+`aa:bb:cc:dd:ee:ff`, `"eth0"` for `char[]`, `0xdeadbeef` for `__u8[]`, `[1 2 3]` for other arrays.
+Per-CPU maps are written on every CPU from the entries list, or on one CPU with `[w]` on its row of the
+entry's CPU table (`Σ` writes them all). Values that are file descriptors (program arrays, maps of maps,
+sockmaps) can't be written.
 
 ## Keybind: Key Search
 

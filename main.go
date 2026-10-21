@@ -114,6 +114,12 @@ type model struct {
 
 	// code is the open code view ([d]) of a program, if any.
 	code *codeView
+	// valEdit is the open entry writer ([w]), if any; notice says what it
+	// wrote, until the next key.
+	valEdit *valEditor
+	notice  string
+	// allowWrite enables [w]: off unless started with --allow-write.
+	allowWrite bool
 
 	// Links of curMap (see links.go); linkGen invalidates in-flight
 	// resolutions.
@@ -384,6 +390,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case entryWritten:
+		return m.onEntryWritten(msg)
+
 	case codeLoaded:
 		if m.code != nil && m.code.prog.ID == msg.id {
 			c := m.code
@@ -409,6 +418,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.code != nil {
 			return m.updateCode(msg.String())
 		}
+		if m.valEdit != nil {
+			return m.updateValEditor(msg)
+		}
+		m.notice = ""
 		if m.editing {
 			return m.updateFilter(msg)
 		}
@@ -454,6 +467,22 @@ func (m model) handleKey(key string) (tea.Model, tea.Cmd) {
 	case "m":
 		m.leaveToRoot()
 		return m, m.showAllMaps()
+	case "w":
+		switch {
+		case m.view < viewEntries:
+		case !m.allowWrite:
+			m.notice = "writing is disabled: start with --allow-write (-w)"
+			return m, nil
+		case m.view == viewEntries && m.visCount() > 0:
+			m.openValEditor(m.visAt(m.entryPane.cur), -1)
+			return m, textinput.Blink
+		case m.perCPUDetail() && m.detailPane.cur > 0: // a CPU row, not Σ
+			m.openValEditor(m.detailIdx, m.detailPane.cur-1)
+			return m, textinput.Blink
+		case m.view == viewDetail && m.store.total > m.detailIdx:
+			m.openValEditor(m.detailIdx, -1)
+			return m, textinput.Blink
+		}
 	case "d":
 		switch {
 		case m.view == viewProgs && m.progPane.cur < len(m.visProgs):
@@ -1311,6 +1340,8 @@ func (m model) View() string {
 		content = m.fmtEdit.view(m.width-2, m.height-3)
 	} else if m.code != nil {
 		content = m.codeContent()
+	} else if m.valEdit != nil {
+		content = m.valEdit.view(m.width-2, m.height-3)
 	}
 	// Fixed-height body so the footer doesn't jump while data streams in.
 	b.WriteString(lipgloss.NewStyle().Height(m.height - 3).MaxHeight(m.height - 3).Render(content))
@@ -1342,6 +1373,9 @@ func (m model) status() string {
 	}
 	if !m.refreshedAt.IsZero() {
 		parts = append(parts, "refreshed "+m.refreshedAt.Format("15:04:05"))
+	}
+	if m.notice != "" {
+		parts = append(parts, m.notice)
 	}
 	parts = slices.DeleteFunc(parts, func(s string) bool { return s == "" })
 	return strings.Join(parts, " • ")
@@ -1404,6 +1438,8 @@ func (m model) help() string {
 	switch {
 	case m.fmtEdit != nil:
 		keys = m.fmtEdit.help()
+	case m.valEdit != nil:
+		keys = m.valEdit.help()
 	case m.code != nil:
 		keys = m.codeHelp()
 	case m.editing:
@@ -1415,11 +1451,14 @@ func (m model) help() string {
 	case m.view == viewMaps:
 		keys = [][2]string{{"↑/↓", "move"}, {"←/→", "scroll"}, {"enter", "open"}, {"d", "code"}, {"/", "filter"}, {"e", "edit format"}, {"esc", "back"}, {"r", "refresh maps"}, {"q", "quit"}}
 	case m.view == viewEntries:
-		keys = [][2]string{{"↑/↓ pgup/pgdn g/G", "move"}, {"←/→", "scroll"}, {"enter", "open"}, {"/", "search"}, {"e", "edit format"}, {"esc", "back"}, {"r", "refresh map"}, {"q", "quit"}}
+		keys = [][2]string{{"↑/↓ pgup/pgdn g/G", "move"}, {"←/→", "scroll"}, {"enter", "open"}, {"/", "search"}, {"w", "write"}, {"e", "edit format"}, {"esc", "back"}, {"r", "refresh map"}, {"q", "quit"}}
 	case m.view == viewDetail && m.perCPUDetail():
-		keys = [][2]string{{"↑/↓", "move"}, {"←/→", "scroll"}, {"e", "edit format"}, {"esc", "back"}, {"r", "refresh entry"}, {"q", "quit"}}
+		keys = [][2]string{{"↑/↓", "move"}, {"←/→", "scroll"}, {"w", "write CPU"}, {"e", "edit format"}, {"esc", "back"}, {"r", "refresh entry"}, {"q", "quit"}}
 	case m.view == viewDetail:
-		keys = [][2]string{{"↑/↓", "scroll"}, {"←/→", "scroll"}, {"e", "edit format"}, {"esc", "back"}, {"r", "refresh entry"}, {"q", "quit"}}
+		keys = [][2]string{{"↑/↓", "scroll"}, {"←/→", "scroll"}, {"w", "write"}, {"e", "edit format"}, {"esc", "back"}, {"r", "refresh entry"}, {"q", "quit"}}
+	}
+	if !m.allowWrite {
+		keys = slices.DeleteFunc(keys, func(k [2]string) bool { return k[0] == "w" })
 	}
 	parts := make([]string, len(keys))
 	for i, k := range keys {
@@ -1430,6 +1469,8 @@ func (m model) help() string {
 
 func main() {
 	maps := flag.Bool("maps", false, "start on the list of all maps instead of the programs")
+	allowWrite := flag.Bool("allow-write", false, "allow writing map entries ([w] on an entry); read-only otherwise")
+	flag.BoolVar(allowWrite, "w", false, "shorthand for --allow-write")
 	flag.BoolVar(&useGlobalConfig, "global-config", false,
 		"load/store formats in $XDG_CONFIG_HOME/ebpfexplorer/formats.json instead of "+localFormatsFile+" next to the binary")
 	flag.Parse()
@@ -1438,7 +1479,9 @@ func main() {
 		fmt.Fprintln(os.Stderr, "warning: not running as root; listing BPF objects usually needs CAP_SYS_ADMIN/CAP_BPF")
 	}
 
-	p := tea.NewProgram(initialModel(*maps), tea.WithAltScreen())
+	m := initialModel(*maps)
+	m.allowWrite = *allowWrite
+	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
