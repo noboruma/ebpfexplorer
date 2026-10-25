@@ -118,8 +118,13 @@ type model struct {
 	// wrote, until the next key.
 	valEdit *valEditor
 	notice  string
-	// allowWrite enables [w]: off unless started with --allow-write.
+	// allowWrite enables [w] and [D]: off unless started with --allow-write.
 	allowWrite bool
+
+	// pauses are the programs paused with [D] (see pause.go); pauseAsk is
+	// the pause waiting for [y].
+	pauses   *pauseSet
+	pauseAsk *pauseRequest
 
 	// Links of curMap (see links.go); linkGen invalidates in-flight
 	// resolutions.
@@ -150,6 +155,7 @@ func initialModel(allMaps bool) model {
 		progsLoading: true,
 		searchGen:    new(atomic.Int64),
 		pendingCur:   -1,
+		pauses:       newPauseSet(),
 	}
 	path, err := formatsPath()
 	if err == nil {
@@ -326,6 +332,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case progsLoaded:
 		m.progsLoading = false
 		m.progs, m.err = msg.rows, msg.err
+		m.pauses.apply(m.progs, msg.err == nil)
+		// The maps view shows where its program is attached.
+		if i := slices.IndexFunc(m.progs, func(p progRow) bool { return p.ID == m.curProg.ID }); i >= 0 {
+			m.curProg = m.progs[i]
+		}
 		m.applyProgFilter()
 		return m, nil
 
@@ -422,6 +433,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateValEditor(msg)
 		}
 		m.notice = ""
+		if m.pauseAsk != nil {
+			return m.answerPause(msg.String())
+		}
 		if m.editing {
 			return m.updateFilter(msg)
 		}
@@ -490,6 +504,8 @@ func (m model) handleKey(key string) (tea.Model, tea.Cmd) {
 		case m.view == viewMaps && !m.allMaps:
 			return m.openCode(m.curProg)
 		}
+	case "D":
+		return m.togglePause()
 	case "/":
 		if f := m.activeFilter(); f != nil {
 			m.editing = true
@@ -505,6 +521,77 @@ func (m model) handleKey(key string) (tea.Model, tea.Cmd) {
 		p.scrollText(key, len(m.detailLines), m.detailRows())
 	}
 	return m, nil
+}
+
+// pauseRequest is a pause asked with [D], waiting for [y].
+type pauseRequest struct {
+	prog  progRow
+	links []attachment
+}
+
+func (r pauseRequest) prompt() string {
+	return fmt.Sprintf("pause prog %d %s on %s? a no-op runs instead (packets pass, cgroup hooks allow) until [D] again or quit",
+		r.prog.ID, r.prog.Name, attachmentLabels(r.links))
+}
+
+// pauseTarget is the program [D] pauses or resumes: the one under the
+// cursor, or the one whose maps are shown.
+func (m model) pauseTarget() (progRow, bool) {
+	switch {
+	case m.view == viewProgs && m.progPane.cur < len(m.visProgs):
+		return m.visProgs[m.progPane.cur], true
+	case m.view == viewMaps && !m.allMaps:
+		return m.curProg, true
+	}
+	return progRow{}, false
+}
+
+// togglePause resumes a paused program (from its own row or its no-op's),
+// or asks to pause it.
+func (m model) togglePause() (tea.Model, tea.Cmd) {
+	p, ok := m.pauseTarget()
+	switch {
+	case !ok:
+		return m, nil
+	case !m.allowWrite:
+		m.notice = "pausing is disabled: start with --allow-write (-w)"
+		return m, nil
+	}
+	if ps := m.pauses.pausedOf(p.ID); len(ps) > 0 {
+		m.notice = fmt.Sprintf("resumed prog %d on %s", ps[0].origID, pausedLabels(ps))
+		if err := m.pauses.resume(ps); err != nil {
+			m.notice = "resume failed: " + err.Error()
+		}
+		m.progsLoading = true
+		return m, loadProgsCmd
+	}
+	links := pausableLinks(p)
+	if len(links) == 0 {
+		m.notice = "nothing to pause: only XDP, tcx, netkit and cgroup bpf_links can be paused"
+		return m, nil
+	}
+	m.pauseAsk = &pauseRequest{p, links}
+	return m, nil
+}
+
+func (m model) answerPause(key string) (tea.Model, tea.Cmd) {
+	r := *m.pauseAsk
+	m.pauseAsk = nil
+	if key != "y" {
+		return m, nil
+	}
+	_, err := m.pauses.pause(r.prog.ID, r.links)
+	if ps := m.pauses.pausedOf(r.prog.ID); len(ps) > 0 {
+		m.notice = fmt.Sprintf("paused prog %d on %s", r.prog.ID, pausedLabels(ps))
+	}
+	if err != nil {
+		if m.notice != "" {
+			m.notice += " • "
+		}
+		m.notice += "pause failed: " + err.Error()
+	}
+	m.progsLoading = true
+	return m, loadProgsCmd
 }
 
 func (m model) onChunk(msg chunkLoaded) (tea.Model, tea.Cmd) {
@@ -1348,6 +1435,8 @@ func (m model) View() string {
 
 	b.WriteString("\n")
 	switch {
+	case m.pauseAsk != nil:
+		b.WriteString(statusStyle.Render(m.pauseAsk.prompt()))
 	case m.code != nil && m.code.err != nil:
 		b.WriteString(errStyle.Render("error: " + m.code.err.Error()))
 	case m.code != nil:
@@ -1442,14 +1531,16 @@ func (m model) help() string {
 		keys = m.valEdit.help()
 	case m.code != nil:
 		keys = m.codeHelp()
+	case m.pauseAsk != nil:
+		keys = [][2]string{{"y", "pause"}, {"any key", "back"}}
 	case m.editing:
 		keys = [][2]string{{"enter", "apply"}, {"esc", "clear"}}
 	case m.view == viewProgs:
-		keys = [][2]string{{"↑/↓", "move"}, {"←/→", "scroll"}, {"enter", "open"}, {"d", "code"}, {"/", "filter"}, {"m", "all maps"}, {"r", "refresh programs"}, {"q", "quit"}}
+		keys = [][2]string{{"↑/↓", "move"}, {"←/→", "scroll"}, {"enter", "open"}, {"d", "code"}, {"D", "pause/resume"}, {"/", "filter"}, {"m", "all maps"}, {"r", "refresh programs"}, {"q", "quit"}}
 	case m.view == viewMaps && m.allMaps:
 		keys = [][2]string{{"↑/↓", "move"}, {"←/→", "scroll"}, {"enter", "open"}, {"/", "filter"}, {"e", "edit format"}, {"p", "programs"}, {"r", "refresh maps"}, {"q", "quit"}}
 	case m.view == viewMaps:
-		keys = [][2]string{{"↑/↓", "move"}, {"←/→", "scroll"}, {"enter", "open"}, {"d", "code"}, {"/", "filter"}, {"e", "edit format"}, {"esc", "back"}, {"r", "refresh maps"}, {"q", "quit"}}
+		keys = [][2]string{{"↑/↓", "move"}, {"←/→", "scroll"}, {"enter", "open"}, {"d", "code"}, {"D", "pause/resume"}, {"/", "filter"}, {"e", "edit format"}, {"esc", "back"}, {"r", "refresh maps"}, {"q", "quit"}}
 	case m.view == viewEntries:
 		keys = [][2]string{{"↑/↓ pgup/pgdn g/G", "move"}, {"←/→", "scroll"}, {"enter", "open"}, {"/", "search"}, {"w", "write"}, {"e", "edit format"}, {"esc", "back"}, {"r", "refresh map"}, {"q", "quit"}}
 	case m.view == viewDetail && m.perCPUDetail():
@@ -1458,7 +1549,7 @@ func (m model) help() string {
 		keys = [][2]string{{"↑/↓", "scroll"}, {"←/→", "scroll"}, {"w", "write"}, {"e", "edit format"}, {"esc", "back"}, {"r", "refresh entry"}, {"q", "quit"}}
 	}
 	if !m.allowWrite {
-		keys = slices.DeleteFunc(keys, func(k [2]string) bool { return k[0] == "w" })
+		keys = slices.DeleteFunc(keys, func(k [2]string) bool { return k[0] == "w" || k[0] == "D" })
 	}
 	parts := make([]string, len(keys))
 	for i, k := range keys {
@@ -1469,7 +1560,7 @@ func (m model) help() string {
 
 func main() {
 	maps := flag.Bool("maps", false, "start on the list of all maps instead of the programs")
-	allowWrite := flag.Bool("allow-write", false, "allow writing map entries ([w] on an entry); read-only otherwise")
+	allowWrite := flag.Bool("allow-write", false, "allow writing map entries ([w] on an entry) and pausing programs ([D]); read-only otherwise")
 	flag.BoolVar(allowWrite, "w", false, "shorthand for --allow-write")
 	flag.BoolVar(&useGlobalConfig, "global-config", false,
 		"load/store formats in $XDG_CONFIG_HOME/ebpfexplorer/formats.json instead of "+localFormatsFile+" next to the binary")
@@ -1482,7 +1573,12 @@ func main() {
 	m := initialModel(*maps)
 	m.allowWrite = *allowWrite
 	p := tea.NewProgram(m, tea.WithAltScreen())
-	if _, err := p.Run(); err != nil {
+	_, err := p.Run()
+	// Paused programs are only held by the explorer: put them back.
+	if rerr := m.pauses.resumeAll(); rerr != nil {
+		fmt.Fprintln(os.Stderr, "resuming paused programs:", rerr)
+	}
+	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

@@ -156,7 +156,8 @@ key: saddr=10.0.0.1 sport=443 proto=6 ifindex=2
 
 ## Writing an Entry
 
-Writing is off by default: start with `sudo ./ebpfexplorer --allow-write` (or `-w`) to enable it. Then `[w]` on an
+Writing is off by default: start with `sudo ./ebpfexplorer --allow-write` (or `-w`) to enable it (it also enables
+[pausing programs](#pausing-a-program)). Then `[w]` on an
 entry (in the entries list or the entry itself) opens its value for writing: one input per
 field of the value's format, or the value's hex without one. Only the fields you change are written; the
 rest of the value keeps the bytes read. `[enter]` checks the fields, then asks before writing; the entry is
@@ -177,6 +178,25 @@ Fields take what the screen shows: numbers (`42`, `0x2a`, `-3`), `10.0.0.1`, `fe
 Per-CPU maps are written on every CPU from the entries list, or on one CPU with `[w]` on its row of the
 entry's CPU table (`Σ` writes them all). Values that are file descriptors (program arrays, maps of maps,
 sockmaps) can't be written.
+
+## Pausing a Program
+
+With `--allow-write` (`-w`), `[D]` on a program (in the programs list or on its maps screen) pauses it, after a
+`[y]` to confirm; `[D]` again resumes it. The kernel can't pause a program, so each of its XDP, tcx, netkit and
+cgroup bpf_links is pointed at a do-nothing program instead (`BPF_LINK_UPDATE`): XDP passes packets, tcx and
+netkit move on to the next program, cgroup hooks allow. The link and the process that owns it don't change, and
+the loader sees nothing unusual.
+
+```
+ 41      xdp_proxy_filter     XDP            2     a1b2c3d4e5f60718  xdp@eth0 (paused)
+ 98      ebpfx_paused         XDP            0     5d6c7b8a9f0e1d2c  xdp@eth0
+```
+
+The do-nothing program is listed as `ebpfx_paused`; `[D]` on it resumes too. Other attachments (kprobes, fentry,
+tracepoints, legacy cgroup or netlink XDP attachments) are left alone. While paused, the explorer is what keeps
+the original program loaded: **quitting resumes every paused program**. If the explorer is killed (`SIGKILL`)
+while a program is paused, the do-nothing program stays attached, and the original is unloaded unless its owner
+still holds it.
 
 ## Keybind: Key Search
 

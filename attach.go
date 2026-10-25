@@ -34,7 +34,8 @@ import (
 type attachment struct {
 	label string
 
-	linkID link.ID // non-zero: attached through a bpf_link
+	linkID   link.ID // non-zero: attached through a bpf_link
+	linkType link.Type
 
 	cgroup string // cgroup directory, for cgroup hooks
 	attach ebpf.AttachType
@@ -101,7 +102,7 @@ func linkAttachments() map[ebpf.ProgramID][]attachment {
 		if err != nil {
 			continue
 		}
-		a := attachment{label: linkTypeName(info.Type), linkID: info.ID}
+		a := attachment{label: linkTypeName(info.Type), linkID: info.ID, linkType: info.Type}
 		switch {
 		case info.XDP() != nil:
 			a.ifindex = int(info.XDP().Ifindex)
