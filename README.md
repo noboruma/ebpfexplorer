@@ -31,20 +31,27 @@ To ship a config within your binary, see below.
 
 ## Programs Explorer (Root View)
 
-Shows every loaded BPF program and where it is attached. `[/]` filters on name, `[m]` switches to the
-[list of all maps](#all-maps), `[d]` shows the program's [code](#code-explorer).
+Shows every loaded BPF program, the CPU it uses and where it is attached. `[/]` filters on name, `[m]` switches
+to the [list of all maps](#all-maps), `[d]` shows the program's [code](#code-explorer).
 
 ```
  eBPF explorer  programs
- ID      Name                 Type           Maps  Tag               Attached
-─────────────────────────────────────────────────────────────────────────────────────────────────
- 41      xdp_proxy_filter     XDP            2     a1b2c3d4e5f60718  xdp@eth0 (native)
- 42      tc_bandwidth         SchedCLS       1     0f1e2d3c4b5a6978  tcx@eth0
- 57      trace_connect        Kprobe         1     9988776655443322
- 10122   sd_devices           CGroupDevice   0     ee0e253c78993a24  cgroup/device@systemd-udev…
+ ID      Name                 Type           CPU%    Maps  Attached
+───────────────────────────────────────────────────────────────────────────────────────
+ 41      xdp_proxy_filter     XDP            3.42    2     xdp@eth0 (native)
+ 42      tc_bandwidth         SchedCLS       0.87    1     tcx@eth0
+ 57      trace_connect        Kprobe         <0.01   1
+ 10122   sd_devices           CGroupDevice   0       0     cgroup/device@systemd-udevd.service
 4 programs
 [↑/↓] move  [←/→] scroll  [enter] open  [d] code  [/] filter  [m] all maps  [r] refresh programs  [q] quit
 ```
+
+`CPU%` is the time the program ran over the last 2 seconds, as in `top`: 100% is one CPU fully busy, and a program
+running on several CPUs can go above. The program's maps screen shows it in its header too. The kernel only counts
+run time while BPF statistics are on: the explorer turns them on while it runs (`BPF_ENABLE_STATS`, Linux 5.8+),
+which adds a clock read to every program run, and the kernel turns them off again when it quits, unless
+`sysctl kernel.bpf_stats_enabled=1` keeps them on. Without them (older kernel, missing `CAP_SYS_ADMIN`), the column
+shows `-` and the status line says why.
 
 ## Code Explorer
 
@@ -77,11 +84,12 @@ Reading instructions needs root; the C column stays empty for programs built wit
 ## Maps Explorer
 
 After selecting a program, `ebpfexplorer` shows the maps a program uses, with their entry count (counted in the background) and whether a format is defined.
-The header shows where the program is attached and which processes hold it open.
+The header shows where the program is attached, its CPU usage, which processes hold it open, and its tag: the
+kernel's hash of its instructions (as `bpftool` shows it), the same for every program loaded from the same code.
 
 ```
  eBPF explorer  programs › prog 41 xdp_proxy_filter
-attached: xdp@eth0 (native)  •  processes: proxy-agent (pid 2211)
+attached: xdp@eth0 (native)  •  cpu: 3.42%  •  processes: proxy-agent (pid 2211)  •  tag: a1b2c3d4e5f60718
  ID      Name                Type            Key   Value  MaxEntries  Entries     Flags  Format
 ─────────────────────────────────────────────────────────────────────────────────────────────────
  12      flows               PerCPUHash      12    16     10000000    counting…   0x0    key+val
@@ -188,8 +196,8 @@ netkit move on to the next program, cgroup hooks allow. The link and the process
 the loader sees nothing unusual.
 
 ```
- 41      xdp_proxy_filter     XDP            2     a1b2c3d4e5f60718  xdp@eth0 (paused)
- 98      ebpfx_paused         XDP            0     5d6c7b8a9f0e1d2c  xdp@eth0
+ 41      xdp_proxy_filter     XDP            0       2     xdp@eth0 (paused)
+ 98      ebpfx_paused         XDP            <0.01   0     xdp@eth0
 ```
 
 The do-nothing program is listed as `ebpfx_paused`; `[D]` on it resumes too. Other attachments (kprobes, fentry,

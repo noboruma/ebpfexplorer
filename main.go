@@ -126,6 +126,13 @@ type model struct {
 	pauses   *pauseSet
 	pauseAsk *pauseRequest
 
+	// CPU% of each program (see stats.go), from the last two run time
+	// samples; statsOn once the kernel counts run time, statsErr otherwise.
+	statsOn  bool
+	statsErr error
+	cpu      map[ebpf.ProgramID]float64
+	cpuPrev  map[ebpf.ProgramID]runSample
+
 	// Links of curMap (see links.go); linkGen invalidates in-flight
 	// resolutions.
 	links   []*mapLink
@@ -313,11 +320,15 @@ func searchCmd(s entryStore, q keyQuery, gen *atomic.Int64, want int64) tea.Cmd 
 }
 
 func (m model) Init() tea.Cmd {
+	cmds := []tea.Cmd{loadProgsCmd}
 	if m.allMaps {
 		// The programs are still loaded: they tell which programs use a map.
-		return tea.Batch(loadProgsCmd, m.listMapsCmd())
+		cmds = append(cmds, m.listMapsCmd())
 	}
-	return loadProgsCmd
+	if m.statsOn {
+		cmds = append(cmds, cpuTickCmd())
+	}
+	return tea.Batch(cmds...)
 }
 
 // --- update ---
@@ -338,6 +349,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.curProg = m.progs[i]
 		}
 		m.applyProgFilter()
+		if m.sampling() && len(m.cpuPrev) == 0 {
+			// First sample now rather than at the next tick.
+			return m, sampleCPUCmd(m.progIDs())
+		}
+		return m, nil
+
+	case cpuTick:
+		if m.sampling() && len(m.progs) > 0 {
+			return m, tea.Batch(cpuTickCmd(), sampleCPUCmd(m.progIDs()))
+		}
+		return m, cpuTickCmd()
+
+	case cpuSampled:
+		m.onCPUSampled(msg)
 		return m, nil
 
 	case mapsLoaded:
@@ -945,8 +970,12 @@ func (m model) headerLines() []string {
 		if m.allMaps {
 			return nil
 		}
-		return []string{labelStyle.Render("attached: ") + attachedOrNone(m.curProg.Attached) +
-			crumbStyle.Render("  •  ") + labelStyle.Render("processes: ") + m.holdersText()}
+		line := labelStyle.Render("attached: ") + attachedOrNone(m.curProg.Attached)
+		if m.statsOn {
+			line += crumbStyle.Render("  •  ") + labelStyle.Render("cpu: ") + m.cpuCell(m.curProg.ID) + "%"
+		}
+		line += crumbStyle.Render("  •  ") + labelStyle.Render("processes: ") + m.holdersText()
+		return []string{line + crumbStyle.Render("  •  ") + labelStyle.Render("tag: ") + m.curProg.Tag}
 	case viewEntries:
 		return []string{
 			crumbStyle.Render(fmt.Sprintf("type=%s key=%dB value=%dB max_entries=%d",
@@ -1040,7 +1069,7 @@ func (m model) table() (tableSpec, bool) {
 			empty = "loading…"
 		}
 		return tableSpec{cols: m.progCols, n: len(m.visProgs), empty: empty,
-			row: func(i int) []string { return progFields(m.visProgs[i]) }}, true
+			row: func(i int) []string { return m.progFields(m.visProgs[i]) }}, true
 	case viewMaps:
 		empty := "this program does not reference any maps"
 		switch {
@@ -1104,12 +1133,12 @@ func (m model) renderEntryList() string {
 	return t.render(m.entryPane, m.listRows())
 }
 
-func progFields(p progRow) []string {
+func (m model) progFields(p progRow) []string {
 	name := p.Name
 	if name == "" {
 		name = "<anon>"
 	}
-	return []string{fmt.Sprint(p.ID), name, p.Type.String(), fmt.Sprint(len(p.MapIDs)), p.Tag, p.Attached}
+	return []string{fmt.Sprint(p.ID), name, p.Type.String(), m.cpuCell(p.ID), fmt.Sprint(len(p.MapIDs)), p.Attached}
 }
 
 func (m model) mapFields(mp mapRow) []string {
@@ -1364,7 +1393,7 @@ func (m *model) formatsChanged() tea.Cmd {
 func (m *model) resize() {
 	w := max(20, m.width-2)
 	m.progCols = fitColumns(w, []colSpec{
-		{"ID", 6, 0}, {"Name", 16, 1}, {"Type", 13, 0}, {"Maps", 4, 0}, {"Tag", 16, 0}, {"Attached", 12, 4},
+		{"ID", 6, 0}, {"Name", 16, 1}, {"Type", 13, 0}, {"CPU%", 6, 0}, {"Maps", 4, 0}, {"Attached", 12, 4},
 	})
 	m.mapCols = fitColumns(w, []colSpec{
 		{"ID", 6, 0}, {"Name", 14, 2}, {"Type", 12, 1}, {"Key", 4, 0}, {"Value", 5, 0}, {"MaxEntries", 10, 0}, {"Entries", 10, 0}, {"Flags", 5, 0}, {"Format", 7, 0},
@@ -1462,6 +1491,9 @@ func (m model) status() string {
 	}
 	if !m.refreshedAt.IsZero() {
 		parts = append(parts, "refreshed "+m.refreshedAt.Format("15:04:05"))
+	}
+	if m.view == viewProgs && m.statsErr != nil {
+		parts = append(parts, "no CPU%: "+m.statsErr.Error())
 	}
 	if m.notice != "" {
 		parts = append(parts, m.notice)
@@ -1572,8 +1604,13 @@ func main() {
 
 	m := initialModel(*maps)
 	m.allowWrite = *allowWrite
+	stats, err := enableStats()
+	m.statsOn, m.statsErr = err == nil, err
+	if stats != nil {
+		defer stats.Close()
+	}
 	p := tea.NewProgram(m, tea.WithAltScreen())
-	_, err := p.Run()
+	_, err = p.Run()
 	// Paused programs are only held by the explorer: put them back.
 	if rerr := m.pauses.resumeAll(); rerr != nil {
 		fmt.Fprintln(os.Stderr, "resuming paused programs:", rerr)
