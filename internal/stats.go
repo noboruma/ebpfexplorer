@@ -1,4 +1,4 @@
-package main
+package internal
 
 // CPU used by programs. The kernel only counts each program's run time while
 // BPF statistics are enabled: either system-wide (sysctl

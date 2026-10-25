@@ -1,4 +1,4 @@
-package main
+package internal
 
 import (
 	"encoding/binary"
@@ -111,7 +111,7 @@ func TestSumPerCPU(t *testing.T) {
 }
 
 func TestFormatStorePersists(t *testing.T) {
-	path := filepath.Join(t.TempDir(), localFormatsFile)
+	path := filepath.Join(t.TempDir(), LocalFormatsFile)
 	s, err := loadFormats(path)
 	if err != nil {
 		t.Fatal(err)
@@ -184,7 +184,7 @@ func TestEmbeddedFormats(t *testing.T) {
 
 	// User definitions win; clearing one falls back to the embedded default,
 	// and embedded defaults are never written to the user's file.
-	path := filepath.Join(dir, localFormatsFile)
+	path := filepath.Join(dir, LocalFormatsFile)
 	s, _ := loadFormats(path)
 	s.setEmbedded(got)
 	if l := s.def(mapRow{Name: "flows"}).Links; l["value"] != "names" {

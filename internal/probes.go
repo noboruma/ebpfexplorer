@@ -1,4 +1,4 @@
-package main
+package internal
 
 // Where kprobes, uprobes and tracepoints are attached.
 //

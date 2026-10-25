@@ -1,4 +1,4 @@
-package main
+package internal
 
 // Pausing programs ([D]). The kernel can't pause a program, but a bpf_link
 // can be pointed at another one: pausing swaps a "do nothing" program of the

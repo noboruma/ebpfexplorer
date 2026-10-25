@@ -1,4 +1,4 @@
-package main
+package internal
 
 // One list/scroll model shared by every screen, so navigation is the same
 // everywhere: ↑/↓ pgup/pgdn g/G move, ←/→ scroll horizontally through text

@@ -1,5 +1,5 @@
-// ebpfexplorer is an interactive browser for the BPF programs, maps and map
-// entries currently loaded in the kernel.
+// Package internal implements ebpfexplorer, an interactive browser for the
+// BPF programs, maps and map entries currently loaded in the kernel.
 //
 //	programs ──enter──▶ maps used by program ──enter──▶ map entries ──enter──▶ entry detail
 //	all maps ──enter──────────────────────────────────▶ map entries ──enter──▶ entry detail
@@ -10,13 +10,11 @@
 // and the UI stays usable (and searchable) while they arrive.
 //
 // Needs CAP_SYS_ADMIN / CAP_BPF (run with sudo).
-package main
+package internal
 
 import (
 	"errors"
-	"flag"
 	"fmt"
-	"os"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -1590,20 +1588,18 @@ func (m model) help() string {
 	return strings.Join(parts, helpStyle.Render("  "))
 }
 
-func main() {
-	maps := flag.Bool("maps", false, "start on the list of all maps instead of the programs")
-	allowWrite := flag.Bool("allow-write", false, "allow writing map entries ([w] on an entry) and pausing programs ([D]); read-only otherwise")
-	flag.BoolVar(allowWrite, "w", false, "shorthand for --allow-write")
-	flag.BoolVar(&useGlobalConfig, "global-config", false,
-		"load/store formats in $XDG_CONFIG_HOME/ebpfexplorer/formats.json instead of "+localFormatsFile+" next to the binary")
-	flag.Parse()
+// Options are the command line settings.
+type Options struct {
+	AllMaps      bool // start on the list of all maps instead of the programs
+	AllowWrite   bool // enable writing entries ([w]) and pausing programs ([D])
+	GlobalConfig bool // formats in the user's config directory, not next to the binary
+}
 
-	if os.Geteuid() != 0 {
-		fmt.Fprintln(os.Stderr, "warning: not running as root; listing BPF objects usually needs CAP_SYS_ADMIN/CAP_BPF")
-	}
-
-	m := initialModel(*maps)
-	m.allowWrite = *allowWrite
+// Run runs the explorer until the user quits.
+func Run(opts Options) error {
+	useGlobalConfig = opts.GlobalConfig
+	m := initialModel(opts.AllMaps)
+	m.allowWrite = opts.AllowWrite
 	stats, err := enableStats()
 	m.statsOn, m.statsErr = err == nil, err
 	if stats != nil {
@@ -1613,10 +1609,7 @@ func main() {
 	_, err = p.Run()
 	// Paused programs are only held by the explorer: put them back.
 	if rerr := m.pauses.resumeAll(); rerr != nil {
-		fmt.Fprintln(os.Stderr, "resuming paused programs:", rerr)
+		err = errors.Join(err, fmt.Errorf("resuming paused programs: %w", rerr))
 	}
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
+	return err
 }

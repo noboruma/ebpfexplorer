@@ -1,4 +1,4 @@
-package main
+package internal
 
 // Links translate IDs: a field of an entry (or its whole key or value) is
 // looked up as a key in another map, and the value found there is shown

@@ -1,4 +1,4 @@
-package main
+package internal
 
 // Where programs are attached. Programs can be attached two ways:
 //

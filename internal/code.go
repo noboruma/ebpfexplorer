@@ -1,4 +1,4 @@
-package main
+package internal
 
 // The code view ([d] on a program): the program as the kernel runs it, after
 // the verifier rewrote it ("xlated"), in bpftool's C-like syntax, each

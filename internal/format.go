@@ -1,4 +1,4 @@
-package main
+package internal
 
 // A small C declaration parser used to pretty-print map keys and values.
 //
@@ -759,8 +759,8 @@ func configDir() (string, error) {
 // directory instead of next to the binary.
 var useGlobalConfig bool
 
-// localFormatsFile is the formats file kept next to the binary by default.
-const localFormatsFile = "ebpfexplorer-formats.json"
+// LocalFormatsFile is the formats file kept next to the binary by default.
+const LocalFormatsFile = "ebpfexplorer-formats.json"
 
 // formatsPath is where formats are loaded from and saved to.
 func formatsPath() (string, error) {
@@ -784,7 +784,7 @@ func localFormatsPath() (string, error) {
 	if real, err := filepath.EvalSymlinks(exe); err == nil {
 		exe = real
 	}
-	return filepath.Join(filepath.Dir(exe), localFormatsFile), nil
+	return filepath.Join(filepath.Dir(exe), LocalFormatsFile), nil
 }
 
 func loadFormats(path string) (*formatStore, error) {

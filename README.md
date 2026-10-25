@@ -3,14 +3,14 @@
 Terminal UI to explore eBPF programs, attached maps and map entries loaded on your machine.
 
 ```sh
-go build -o ebpfexplorer .
+go build -o ebpfexplorer ./cmd/ebpfexplorer
 sudo ./ebpfexplorer
 ```
 
 or
 
 ```sh
-go install github.com/noboruma/ebpfexplorer@latest
+go install github.com/noboruma/ebpfexplorer/cmd/ebpfexplorer@latest
 ```
 
 or

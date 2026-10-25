@@ -1,4 +1,4 @@
-package main
+package internal
 
 // Writing a map entry ([w] on an entry): one input per field of the value's
 // format, or the value's hex without one, then BPF_MAP_UPDATE_ELEM. Only the
